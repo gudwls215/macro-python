@@ -1,0 +1,129 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+PIPFILE.lock
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Windows
+*.tmp
+*.temp
+*.log
+
+# 매크로 관련 임시 파일
+temp_click.vbs
+*.vbs
+screenshot*.png
+timing_log.txt
+
+# 설정 파일 (민감한 정보 포함 가능)
+config.json
+settings.ini
+*.conf
+
+# 테스트 결과
+test_results/
+logs/
+*.test
+
+# Chrome Driver
+chromedriver.exe
+chromedriver
+geckodriver.exe
+geckodriver
+
+# Selenium 캐시
+.wdm/
+webdriver_manager/
+
+# 사용자별 설정
+user_settings.json
+button_positions.json
+timing_history.json
+
+# 패키지 관리
+requirements.txt.bak
+pip-log.txt
+pip-delete-this-directory.txt
+
+# 컴파일된 C++ 파일 (precision timer)
+*.exe
+*.dll
+*.obj
+*.o
+*.lib
+*.pdb
+
+# 백업 파일
+*.bak
+*.backup
+*_backup.*
+*_old.*
+
+# 런타임 생성 파일
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+.pytest_cache/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# 환경 변수
+.env
+.env.local
+.env.development
+.env.test
+.env.production
+
+# 사용자 데이터
+user_data/
+personal/
+private/
+
+# 서버 응답 캐시
+server_cache/
+response_cache/
