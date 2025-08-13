@@ -1,0 +1,25 @@
+# 정밀 구매 타이밍 매크로 v2.0 - 필수 패키지
+
+# === 핵심 패키지 (필수) ===
+pyautogui>=0.9.54          # 자동 클릭, 마우스 제어
+keyboard>=0.13.5           # Z키 입력 감지, 좌표 캡처
+
+# === pyautogui 의존성 (필수) ===
+pillow>=9.0.0             # 이미지 처리, 스크린샷 기능
+opencv-python>=4.5.0      # 고급 화면 인식 (선택사항이지만 권장)
+
+# === 추가 기능 패키지 (선택사항) ===
+# selenium>=4.0.0         # 웹 자동화 (현재 미사용)
+# webdriver-manager>=3.8.0 # Chrome 드라이버 자동 관리 (현재 미사용)
+
+# === 참고사항 ===
+# 1. keyboard 모듈은 Windows에서 관리자 권한이 필요할 수 있습니다
+# 2. 가상환경 사용을 권장합니다
+# 3. Python 3.8 이상 필요
+
+# === 설치 방법 ===
+# pip install -r requirements.txt
+
+# === 문제 해결 ===
+# 권한 오류 시: pip install --user -r requirements.txt
+# 관리자 권한으로 명령 프롬프트 실행 후 설치 권장

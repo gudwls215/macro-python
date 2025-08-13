@@ -1320,12 +1320,36 @@ class TimeSyncMacroGUI:
     def open_log_file(self):
         """로그 파일 열기"""
         try:
+            log_file_to_open = None
+            
+            # 1. 현재 인스턴스의 로그 파일이 있는지 확인
             if hasattr(self, 'log_file_path') and os.path.exists(self.log_file_path):
-                # Windows에서 기본 텍스트 에디터로 열기
-                os.startfile(self.log_file_path)
-                self.log(f"📄 로그 파일을 열었습니다: {self.log_file_path}")
+                log_file_to_open = self.log_file_path
             else:
-                messagebox.showwarning("경고", "로그 파일을 찾을 수 없습니다.")
+                # 2. logs 폴더에서 가장 최근 로그 파일 찾기
+                logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+                if os.path.exists(logs_dir):
+                    log_files = [f for f in os.listdir(logs_dir) if f.endswith('.log')]
+                    if log_files:
+                        # 가장 최근 파일 선택
+                        log_files.sort(reverse=True)
+                        log_file_to_open = os.path.join(logs_dir, log_files[0])
+                
+                # 3. 메인 디렉토리의 로그 파일도 확인
+                if not log_file_to_open:
+                    main_dir = os.path.dirname(os.path.abspath(__file__))
+                    main_log_files = [f for f in os.listdir(main_dir) if f.endswith('.log')]
+                    if main_log_files:
+                        main_log_files.sort(reverse=True)
+                        log_file_to_open = os.path.join(main_dir, main_log_files[0])
+            
+            if log_file_to_open and os.path.exists(log_file_to_open):
+                # Windows에서 기본 텍스트 에디터로 열기
+                os.startfile(log_file_to_open)
+                self.log(f"📄 로그 파일을 열었습니다: {log_file_to_open}")
+            else:
+                messagebox.showwarning("경고", "로그 파일을 찾을 수 없습니다.\n매크로를 한 번 실행한 후 다시 시도해주세요.")
+                
         except Exception as e:
             self.log(f"❌ 로그 파일 열기 실패: {e}")
             messagebox.showerror("오류", f"로그 파일 열기 실패:\n{e}")
