@@ -21,6 +21,26 @@ import os
 import json
 import logging
 
+# pyautogui와 keyboard 모듈 임포트 (선택적)
+try:
+    import pyautogui
+    PYAUTOGUI_AVAILABLE = True
+    # pyautogui 실행 중 마우스를 화면 모서리로 이동하여 정지하는 기능 비활성화
+    pyautogui.FAILSAFE = False
+    pyautogui.PAUSE = 0  # 기본 지연 제거
+except ImportError:
+    PYAUTOGUI_AVAILABLE = False
+    print("❌ pyautogui 모듈이 설치되지 않았습니다.")
+    print("💡 설치 방법: pip install pyautogui")
+
+try:
+    import keyboard
+    KEYBOARD_AVAILABLE = True
+except ImportError:
+    KEYBOARD_AVAILABLE = False
+    print("❌ keyboard 모듈이 설치되지 않았습니다.")
+    print("💡 설치 방법: pip install keyboard")
+
 
 class TimeSyncMacroGUI:
     def __init__(self):
@@ -36,6 +56,11 @@ class TimeSyncMacroGUI:
         self.measurement_history = []  # 측정 히스토리 저장
         self.browser_opened = False
         self.timing_adjustments = []  # 타이밍 조정 히스토리
+        
+        # 구매 버튼 위치 관련 변수들
+        self.purchase_button_positions = []  # 여러 좌표 저장
+        self.position_capture_mode = False  # 좌표 캡처 모드 온/오프
+        self.position_listener = None  # 키보드 리스너
         
         # 로깅 시스템 초기화
         self.setup_logging()
@@ -84,28 +109,64 @@ class TimeSyncMacroGUI:
         self.log(f"📄 로그 파일 생성: {log_filename}")
     
     def setup_high_resolution_timer(self):
-        """Windows 고해상도 타이머 설정"""
+        """Windows 고해상도 타이머 설정 (개선된 버전)"""
         try:
-            # Windows에서 1ms 정밀도 타이머 요청
+            import ctypes
+            # Windows에서 최고 정밀도 타이머 요청
             winmm = ctypes.windll.winmm
-            winmm.timeBeginPeriod(1)
+            
+            # 1ms 정밀도 요청 (기본)
+            result = winmm.timeBeginPeriod(1)
+            
+            # 더 높은 정밀도 시도 (0.5ms)
+            try:
+                result2 = winmm.timeBeginPeriod(1)  # Windows는 보통 1ms가 최소
+                self.log(f"⚡ 고해상도 타이머 설정: 1ms (결과: {result})")
+            except:
+                self.log(f"⚡ 기본 고해상도 타이머 설정: 1ms (결과: {result})")
+            
+            # 프로세스 우선순위 높이기 (선택적)
+            try:
+                # psutil이 있으면 사용
+                try:
+                    import psutil
+                    import os
+                    # 현재 프로세스의 우선순위를 높음으로 설정
+                    p = psutil.Process(os.getpid())
+                    p.nice(psutil.HIGH_PRIORITY_CLASS)
+                    self.log("🚀 프로세스 우선순위 향상 (psutil)")
+                except ImportError:
+                    # psutil이 없어도 Windows API로 시도
+                    kernel32 = ctypes.windll.kernel32
+                    handle = kernel32.GetCurrentProcess()
+                    # HIGH_PRIORITY_CLASS = 0x00000080
+                    kernel32.SetPriorityClass(handle, 0x00000080)
+                    self.log("🚀 프로세스 우선순위 향상 (Windows API)")
+            except Exception as e:
+                self.log(f"프로세스 우선순위 설정 실패: {e}")
+                    
         except Exception as e:
             self.log(f"고해상도 타이머 설정 실패: {e}")
     
     def precise_sleep(self, duration):
-        """정밀한 대기 함수 (busy wait + sleep 조합)"""
+        """정밀한 대기 함수 (최적화된 hybrid 방식)"""
         if duration <= 0:
             return
         
         end_time = time.perf_counter() + duration
         
-        # 큰 지연은 일반 sleep 사용
-        if duration > 0.01:  # 10ms 이상
-            time.sleep(duration - 0.01)
+        # 적응적 대기 전략
+        if duration > 0.05:  # 50ms 이상 - 일반 sleep으로 대부분 대기
+            time.sleep(duration - 0.005)  # 5ms 여유 두고 sleep
+        elif duration > 0.01:  # 10-50ms - 부분 sleep
+            time.sleep(duration * 0.7)  # 70%만 sleep
+        elif duration > 0.002:  # 2-10ms - 짧은 sleep
+            time.sleep(duration * 0.3)  # 30%만 sleep
+        # 2ms 이하는 pure busy wait
         
-        # 마지막 10ms는 busy wait으로 정밀 제어
+        # 나머지 시간을 busy wait으로 정밀하게
         while time.perf_counter() < end_time:
-            pass
+            pass  # CPU 집중 대기
     
     def create_widgets(self):
         """GUI 위젯 생성"""
@@ -175,11 +236,30 @@ class TimeSyncMacroGUI:
         ttk.Label(info_frame, text="측정 횟수:").grid(row=4, column=0, sticky=tk.W)
         ttk.Label(info_frame, textvariable=self.measurement_count_var).grid(row=4, column=1, sticky=tk.W)
         
-        # 현재 시간 표시
-        self.current_time_var = tk.StringVar()
-        time_label = ttk.Label(info_frame, textvariable=self.current_time_var, 
-                              font=("맑은 고딕", 10, "bold"))
-        time_label.grid(row=5, column=0, columnspan=2, pady=5)
+        # 현재 시간 표시 (개선된 세로 배치)
+        time_frame = ttk.LabelFrame(info_frame, text="실시간 시간", padding="5")
+        time_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        
+        # 서버 시간
+        self.server_time_var = tk.StringVar()
+        ttk.Label(time_frame, text="서버 시간:", font=("맑은 고딕", 9, "bold")).grid(row=0, column=0, sticky=tk.W)
+        server_time_label = ttk.Label(time_frame, textvariable=self.server_time_var, 
+                                     font=("Consolas", 11, "bold"), foreground="blue")
+        server_time_label.grid(row=0, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # 로컬 시간
+        self.local_time_var = tk.StringVar()
+        ttk.Label(time_frame, text="로컬 시간:", font=("맑은 고딕", 9, "bold")).grid(row=1, column=0, sticky=tk.W)
+        local_time_label = ttk.Label(time_frame, textvariable=self.local_time_var, 
+                                    font=("Consolas", 11, "bold"), foreground="green")
+        local_time_label.grid(row=1, column=1, sticky=tk.W, padx=(10, 0))
+        
+        # 시간차 표시
+        self.time_diff_var = tk.StringVar()
+        ttk.Label(time_frame, text="시간차:", font=("맑은 고딕", 9, "bold")).grid(row=2, column=0, sticky=tk.W)
+        time_diff_label = ttk.Label(time_frame, textvariable=self.time_diff_var, 
+                                   font=("Consolas", 10, "bold"), foreground="red")
+        time_diff_label.grid(row=2, column=1, sticky=tk.W, padx=(10, 0))
         
         # 버튼들
         button_frame = ttk.Frame(main_frame)
@@ -209,10 +289,13 @@ class TimeSyncMacroGUI:
                                              command=self.open_browser_early)
         self.open_browser_button.pack(side=tk.LEFT, padx=5)
         
-        # 구매 버튼 위치 설정
-        self.set_position_button = ttk.Button(button_frame2, text="구매버튼 위치 설정", 
-                                             command=self.set_purchase_button_position)
+        # 구매 버튼 위치 설정 (개선된 버전)
+        self.set_position_button = ttk.Button(button_frame2, text="🎯 좌표 캡처 모드 (OFF)", 
+                                             command=self.toggle_position_capture_mode)
         self.set_position_button.pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(button_frame2, text="🗑️ 좌표 초기화", 
+                  command=self.clear_all_positions).pack(side=tk.LEFT, padx=5)
         
         ttk.Button(button_frame2, text="로그 지우기", 
                   command=self.clear_log).pack(side=tk.RIGHT, padx=5)
@@ -222,9 +305,6 @@ class TimeSyncMacroGUI:
         
         ttk.Button(button_frame2, text="요약 리포트", 
                   command=self.export_timing_summary).pack(side=tk.RIGHT, padx=5)
-        
-        # 구매 버튼 위치 저장 변수
-        self.purchase_button_pos = None
         
         # 로그 표시
         log_frame = ttk.LabelFrame(main_frame, text="실행 로그", padding="10")
@@ -263,28 +343,55 @@ class TimeSyncMacroGUI:
         self.root.after(100, process_log)
     
     def update_current_time(self):
-        """현재 시간 업데이트 (서버 시간 기준)"""
-        current_local_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]  # ms까지 표시
+        """현재 시간 업데이트 (개선된 세로 비교 형식)"""
+        # 현재 로컬 시간
+        current_local_time = datetime.now()
+        local_time_str = current_local_time.strftime("%H:%M:%S.%f")[:-3]  # ms까지 표시
         
         if hasattr(self, 'server_time_offset') and self.server_time_offset != 0:
             # 서버 시간 계산 (로컬 시간 + 오프셋)
             current_server_timestamp = time.time() + self.server_time_offset
             current_server_time = datetime.fromtimestamp(current_server_timestamp)
+            server_time_str = current_server_time.strftime("%H:%M:%S.%f")[:-3]
             
-            # 서버 시간을 메인으로 표시
-            self.current_time_var.set(f"서버 시간: {current_server_time.strftime('%H:%M:%S.%f')[:-3]} | 로컬: {current_local_time}")
+            # 시간차 계산 (밀리초)
+            time_diff_ms = self.server_time_offset * 1000
             
-            # 동기화된 상태에서는 로컬 시간도 서버 시간에 맞춰 표시
-            sync_status_text = f"동기화 완료 (서버와 {abs(self.server_time_offset)*1000:.1f}ms 차이)"
-            if hasattr(self, 'sync_status') and self.sync_status.get() == "동기화 완료":
+            # GUI 업데이트
+            self.server_time_var.set(f"{server_time_str}")
+            self.local_time_var.set(f"{local_time_str}")
+            
+            # 시간차 색상 설정
+            if abs(time_diff_ms) < 100:  # 100ms 이하
+                diff_color = "green"
+                status_icon = "✅"
+            elif abs(time_diff_ms) < 500:  # 500ms 이하
+                diff_color = "orange"
+                status_icon = "⚠️"
+            else:  # 500ms 초과
+                diff_color = "red"
+                status_icon = "❌"
+            
+            self.time_diff_var.set(f"{status_icon} {time_diff_ms:+.1f}ms")
+            
+            # 동기화 상태 업데이트
+            sync_status_text = f"✅ 동기화 완료 ({abs(time_diff_ms):.1f}ms 차이)"
+            if hasattr(self, 'sync_status'):
                 self.sync_status.set(sync_status_text)
+                
         else:
-            self.current_time_var.set(f"현재 시간: {current_local_time} (동기화 필요)")
+            # 동기화 안된 상태
+            self.server_time_var.set("❌ 동기화 필요")
+            self.local_time_var.set(f"{local_time_str}")
+            self.time_diff_var.set("--- ms")
+            
+            if hasattr(self, 'sync_status'):
+                self.sync_status.set("❌ 동기화 안됨")
         
-        self.root.after(100, self.update_current_time)  # 100ms마다 업데이트
+        self.root.after(50, self.update_current_time)  # 50ms마다 업데이트 (더 빠르게)
     
     def open_browser_early(self):
-        """브라우저 미리 열기"""
+        """브라우저 미리 열기 (최적화된 버전)"""
         url = self.url_var.get().strip()
         if not url or url == "https://":
             messagebox.showerror("오류", "URL을 입력하세요.")
@@ -295,33 +402,145 @@ class TimeSyncMacroGUI:
             self.url_var.set(url)
         
         try:
-            webbrowser.open(url)
+            # Chrome을 고성능 모드로 실행
+            import subprocess
+            
+            # Chrome 전용 최적화 플래그
+            chrome_flags = [
+                '--disable-web-security',
+                '--disable-features=VizDisplayCompositor',
+                '--disable-gpu-vsync', 
+                '--max_old_space_size=4096',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+                '--disable-ipc-flooding-protection',
+                '--aggressive-cache-discard',
+                '--disable-extensions',
+                '--no-sandbox'
+            ]
+            
+            chrome_path = None
+            possible_paths = [
+                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+                'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+                os.path.expanduser('~\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe')
+            ]
+            
+            for path in possible_paths:
+                if os.path.exists(path):
+                    chrome_path = path
+                    break
+            
+            if chrome_path:
+                # Chrome을 고성능으로 미리 실행
+                cmd = [chrome_path] + chrome_flags + [url]
+                subprocess.Popen(cmd)
+                self.log("🚀 Chrome 고성능 모드로 페이지 미리 로드 중...")
+            else:
+                # 기본 브라우저로 실행
+                webbrowser.open(url)
+                self.log("📱 기본 브라우저로 페이지 로드 중...")
+            
             self.browser_opened = True
-            self.log("브라우저를 미리 열었습니다. 매크로 실행 시 구매 버튼을 자동으로 클릭합니다.")
+            
+            # 페이지 완전 로딩 대기 (비동기)
+            def wait_for_page_load():
+                time.sleep(3)  # 페이지 기본 로딩
+                self.log("✅ 브라우저 준비 완료! 매크로 실행 시 즉시 클릭됩니다.")
+            
+            threading.Thread(target=wait_for_page_load, daemon=True).start()
+            
         except Exception as e:
             self.log(f"브라우저 열기 실패: {e}")
+            # 백업으로 기본 브라우저 사용
+            webbrowser.open(url)
+            self.browser_opened = True
     
-    def set_purchase_button_position(self):
-        """구매 버튼 위치를 마우스로 설정"""
+    def toggle_position_capture_mode(self):
+        """좌표 캡처 모드 온/오프 토글"""
+        self.position_capture_mode = not self.position_capture_mode
+        
+        if self.position_capture_mode:
+            # 캡처 모드 시작
+            self.set_position_button.config(text="🟢 좌표 캡처 모드 (ON)")
+            self.start_position_capture()
+            self.log("🎯 좌표 캡처 모드 활성화!")
+            self.log("💡 사용법:")
+            self.log("  1. 구매 버튼 위에 마우스 커서를 올리세요")
+            self.log("  2. Z키를 눌러 좌표를 추가하세요")
+            self.log("  3. 여러 버튼이 있다면 반복하세요")
+            self.log("  4. 완료되면 다시 버튼을 클릭해 모드를 끄세요")
+        else:
+            # 캡처 모드 종료
+            self.set_position_button.config(text="🎯 좌표 캡처 모드 (OFF)")
+            self.stop_position_capture()
+            self.log("🎯 좌표 캡처 모드 비활성화")
+            
+            if len(self.purchase_button_positions) > 0:
+                self.log(f"✅ 총 {len(self.purchase_button_positions)}개 좌표 저장됨:")
+                for i, (x, y) in enumerate(self.purchase_button_positions):
+                    self.log(f"  버튼 {i+1}: ({x}, {y})")
+                self.log("🚀 매크로 실행 시 모든 좌표를 동시에 클릭합니다!")
+            else:
+                self.log("⚠️ 저장된 좌표가 없습니다")
+    
+    def start_position_capture(self):
+        """좌표 캡처 시작 (키보드 리스너 활성화)"""
         try:
-            import pyautogui
+            import keyboard
             
-            # 카운트다운 시작
-            for i in range(5, 0, -1):
-                self.log(f"구매 버튼 위에 마우스를 올리세요... {i}초")
-                time.sleep(1)
+            def on_z_key():
+                """Z키가 눌렸을 때 현재 마우스 위치 저장"""
+                try:
+                    import pyautogui
+                    x, y = pyautogui.position()
+                    self.purchase_button_positions.append((x, y))
+                    
+                    self.log(f"📍 좌표 {len(self.purchase_button_positions)} 추가: ({x}, {y})")
+                    
+                    # 간단한 피드백
+                    try:
+                        import winsound
+                        winsound.Beep(1500, 100)  # 높은 음으로 확인
+                    except:
+                        pass
+                        
+                except Exception as e:
+                    self.log(f"❌ 좌표 추가 실패: {e}")
             
-            # 현재 마우스 위치 저장
-            x, y = pyautogui.position()
-            self.purchase_button_pos = (x, y)
-            
-            self.log(f"구매 버튼 위치가 설정되었습니다: ({x}, {y})")
-            self.log("이제 매크로 실행 시 이 위치를 우선적으로 클릭합니다.")
+            # Z키 리스너 등록
+            keyboard.on_press_key('z', lambda _: on_z_key())
+            self.position_listener = keyboard
             
         except ImportError:
-            self.log("pyautogui가 설치되지 않았습니다.")
+            self.log("❌ keyboard 모듈이 설치되지 않았습니다.")
+            self.log("💡 설치 방법: pip install keyboard")
+            self.position_capture_mode = False
+            self.set_position_button.config(text="🎯 좌표 캡처 모드 (OFF)")
         except Exception as e:
-            self.log(f"위치 설정 실패: {e}")
+            self.log(f"❌ 키보드 리스너 시작 실패: {e}")
+            self.position_capture_mode = False
+            self.set_position_button.config(text="🎯 좌표 캡처 모드 (OFF)")
+    
+    def stop_position_capture(self):
+        """좌표 캡처 종료 (키보드 리스너 비활성화)"""
+        try:
+            if self.position_listener:
+                self.position_listener.unhook_all()
+                self.position_listener = None
+        except Exception as e:
+            self.log(f"키보드 리스너 종료 중 오류: {e}")
+    
+    def clear_all_positions(self):
+        """모든 저장된 좌표 삭제"""
+        self.purchase_button_positions = []
+        self.log("🗑️ 모든 좌표가 삭제되었습니다")
+    
+    def set_purchase_button_position(self):
+        """기존 방식 (호환성 유지)"""
+        self.log("⚠️ 기존 방식은 새로운 좌표 캡처 모드로 변경되었습니다")
+        self.log("💡 '좌표 캡처 모드' 버튼을 사용하세요!")
     
     def continuous_sync_monitoring(self, url, duration=30):
         """연속적인 시간 동기화 모니터링"""
@@ -740,13 +959,28 @@ class TimeSyncMacroGUI:
                         
                         # 실제 측정된 클릭 실행 시간 반영 및 동적 조정
                         if hasattr(self, 'execution_time_history') and len(self.execution_time_history) > 0:
-                            # 최근 실행 시간들의 평균 사용
+                            # 최근 실행 시간들의 가중 평균 사용 (최근 것에 더 높은 가중치)
                             recent_times = self.execution_time_history[-5:]  # 최근 5회
-                            click_execution_time = sum(recent_times) / len(recent_times)
-                            self.log(f"🕐 동적 실행시간: {click_execution_time*1000:.1f}ms (최근 {len(recent_times)}회 평균)")
+                            if len(recent_times) >= 3:
+                                weights = [0.4, 0.3, 0.2, 0.1][:len(recent_times)]  # 최근 것부터 높은 가중치
+                                weights = weights[::-1]  # 순서 맞춤
+                                weighted_avg = sum(t * w for t, w in zip(recent_times, weights)) / sum(weights)
+                                click_execution_time = weighted_avg
+                                self.log(f"🕐 가중평균 실행시간: {click_execution_time*1000:.1f}ms (최근 {len(recent_times)}회)")
+                            else:
+                                click_execution_time = sum(recent_times) / len(recent_times)
+                                self.log(f"🕐 동적 실행시간: {click_execution_time*1000:.1f}ms (최근 {len(recent_times)}회 평균)")
                         else:
-                            click_execution_time = 0.088  # 초기 추정값 (이전 로그 기준)
-                            self.log(f"🕐 초기 실행시간: {click_execution_time*1000:.1f}ms (추정값)")
+                            # 최적화된 초기 추정값 (새로운 클릭 함수 기준)
+                            if hasattr(self, 'purchase_button_positions') and len(self.purchase_button_positions) > 0:
+                                # 여러 좌표가 있을 때의 예상 실행시간
+                                base_time = 0.008  # 8ms (첫 번째 클릭)
+                                additional_time = len(self.purchase_button_positions) * 0.002  # 추가 클릭당 2ms
+                                click_execution_time = base_time + additional_time
+                                self.log(f"🕐 다중좌표 실행시간: {click_execution_time*1000:.1f}ms ({len(self.purchase_button_positions)}개 좌표)")
+                            else:
+                                click_execution_time = 0.025  # 25ms (키보드/위치 클릭)
+                                self.log(f"🕐 초기 실행시간: {click_execution_time*1000:.1f}ms (최적화 추정값)")
                         
                         # ⭐ 핵심 수정: 서버 시간 기준으로 직접 계산
                         # 목표 도착 시간 = target_timestamp + target_arrival_delay
@@ -956,133 +1190,123 @@ class TimeSyncMacroGUI:
         threading.Thread(target=macro_thread, daemon=True).start()
     
     def click_purchase_button(self, url):
-        """구매 버튼을 자동으로 클릭 (최적화된 고속 버전)"""
+        """구매 버튼을 자동으로 클릭 (다중 좌표 동시 클릭 버전)"""
         try:
-            # 브라우저가 미리 열려있지 않으면 열기
-            if not self.browser_opened:
-                self.log("브라우저를 열고 페이지를 로드합니다...")
-                webbrowser.open(url)
-                self.browser_opened = True
-                time.sleep(3)  # 페이지 로딩 대기
+            click_start_time = time.perf_counter()
             
-            # pyautogui를 사용한 초고속 자동 클릭
+            # pyautogui를 사용한 초고속 다중 클릭
             try:
                 import pyautogui
-                pyautogui.FAILSAFE = False  # 속도를 위해 안전모드 해제
-                pyautogui.PAUSE = 0  # 기본 대기시간 제거
                 
-                click_start_time = time.perf_counter()
+                # ⚡ 최고 속도 설정
+                pyautogui.FAILSAFE = False  # 안전모드 완전 해제
+                pyautogui.PAUSE = 0  # 모든 대기시간 제거
                 
-                # 브라우저 창 활성화 (간소화)
+                # 🎯 방법 1: 저장된 다중 좌표 동시 클릭 (최우선 - 가장 빠름)
+                if hasattr(self, 'purchase_button_positions') and len(self.purchase_button_positions) > 0:
+                    try:
+                        self.log(f"🎯 {len(self.purchase_button_positions)}개 좌표 동시 클릭 시작!")
+                        
+                        # 모든 좌표를 빠르게 연속 클릭
+                        for i, (x, y) in enumerate(self.purchase_button_positions):
+                            pyautogui.click(x, y, duration=0)
+                            self.log(f"  ⚡ 클릭 {i+1}: ({x}, {y})")
+                            
+                            # 동시성을 위해 아주 짧은 대기만
+                            if i < len(self.purchase_button_positions) - 1:
+                                time.sleep(0.001)  # 1ms만 대기
+                        
+                        click_end_time = time.perf_counter()
+                        actual_click_time = (click_end_time - click_start_time) * 1000
+                        self.log(f"🎯 다중 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
+                        return
+                        
+                    except Exception as e:
+                        self.log(f"다중 좌표 클릭 실패: {e}")
+                
+                # 🚀 방법 2: 키보드 즉시 실행 (저장된 좌표가 없을 때)
                 try:
-                    import subprocess
-                    subprocess.run([
-                        'powershell', '-Command', 
-                        'Get-Process | Where-Object {$_.ProcessName -match "chrome|firefox|msedge"} | Select-Object -First 1 | ForEach-Object {Add-Type -AssemblyName Microsoft.VisualBasic; [Microsoft.VisualBasic.Interaction]::AppActivate($_.Id)}'
-                    ], capture_output=True, timeout=1, shell=True)
-                except:
-                    pass
+                    self.log("⚡ 저장된 좌표 없음 - 키보드 클릭으로 대체")
+                    
+                    # Enter 키 즉시 실행 (가장 빠름)
+                    pyautogui.press('enter')
+                    
+                    # 백업으로 Space 키도 즉시 실행
+                    pyautogui.press('space')
+                    
+                    self.log("⚡ 키보드 즉시 실행 (Enter/Space)")
+                    
+                    click_end_time = time.perf_counter()
+                    actual_click_time = (click_end_time - click_start_time) * 1000
+                    self.log(f"🎯 키보드 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
+                    return
+                    
+                except Exception as e:
+                    self.log(f"키보드 클릭 실패: {e}")
                 
-                # 구매 버튼 클릭 시도 (빠른 순서대로)
-                button_clicked = False
-                
-                # 방법 0: 미리 설정된 위치 (최우선 - 가장 빠름)
-                if hasattr(self, 'purchase_button_pos') and self.purchase_button_pos:
-                    try:
-                        x, y = self.purchase_button_pos
-                        pyautogui.click(x, y)
-                        button_clicked = True
-                        self.log(f"✅ 설정 위치 즉시 클릭: ({x}, {y})")
-                    except:
-                        pass
-                
-                # 방법 1: 빠른 키보드 조작 (설정 위치 없을 때)
-                if not button_clicked:
-                    try:
-                        # Enter 키로 현재 포커스된 요소 활성화 시도
-                        pyautogui.press('enter')
-                        time.sleep(0.1)
-                        
-                        # Space 키로도 시도
-                        pyautogui.press('space')
-                        time.sleep(0.1)
-                        
-                        button_clicked = True
-                        self.log("✅ 키보드 즉시 클릭 (Enter/Space)")
-                    except:
-                        pass
-                
-                # 방법 2: 화면 중앙 및 일반적인 구매 버튼 위치 (빠른 클릭)
-                if not button_clicked:
-                    try:
-                        screen_width, screen_height = pyautogui.size()
-                        
-                        # 일반적인 구매 버튼 위치들 (빠른 순서)
-                        quick_positions = [
-                            (int(screen_width * 0.85), int(screen_height * 0.75)),   # 우하단
-                            (int(screen_width * 0.5), int(screen_height * 0.8)),    # 중앙 하단
-                            (int(screen_width * 0.9), int(screen_height * 0.6)),    # 우측 중간
-                        ]
-                        
-                        for pos in quick_positions:
-                            pyautogui.click(pos[0], pos[1])
-                            time.sleep(0.05)  # 아주 짧은 대기
-                        
-                        button_clicked = True
-                        self.log("✅ 예상 위치 연속 클릭")
-                    except:
-                        pass
-                
-                # 방법 3: 텍스트 검색 (마지막 수단 - 느림)
-                if not button_clicked:
-                    try:
-                        # 최소한의 텍스트 검색
-                        pyautogui.hotkey('ctrl', 'f')
-                        time.sleep(0.1)
-                        pyautogui.typewrite('구매')
-                        time.sleep(0.1)
-                        pyautogui.press('enter')
-                        time.sleep(0.1)
-                        pyautogui.press('escape')
-                        time.sleep(0.1)
-                        
-                        # 빠른 Tab 이동
-                        for _ in range(10):
-                            pyautogui.press('tab')
-                            time.sleep(0.02)
-                        
-                        pyautogui.press('enter')
-                        
-                        self.log("✅ 텍스트 검색 클릭")
-                    except:
-                        pass
+                # 🚀 방법 3: 화면 예상 위치 연타 (마지막 백업)
+                try:
+                    screen_width, screen_height = pyautogui.size()
+                    
+                    # 일반적인 구매 버튼 위치들
+                    backup_positions = [
+                        (int(screen_width * 0.85), int(screen_height * 0.75)),   # 우하단
+                        (int(screen_width * 0.5), int(screen_height * 0.8)),    # 중앙 하단
+                        (int(screen_width * 0.9), int(screen_height * 0.6)),    # 우측 중간
+                    ]
+                    
+                    self.log(f"🔄 백업 위치 {len(backup_positions)}곳 연타")
+                    
+                    for i, pos in enumerate(backup_positions):
+                        pyautogui.click(pos[0], pos[1], duration=0)
+                        if i < len(backup_positions) - 1:
+                            time.sleep(0.002)  # 2ms 대기
+                    
+                    click_end_time = time.perf_counter()
+                    actual_click_time = (click_end_time - click_start_time) * 1000
+                    self.log(f"🔄 백업 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
+                    return
+                    
+                except Exception as e:
+                    self.log(f"백업 위치 클릭 실패: {e}")
                 
                 click_end_time = time.perf_counter()
                 actual_click_time = (click_end_time - click_start_time) * 1000
-                
-                self.log(f"⚡ 클릭 실행 완료! 소요시간: {actual_click_time:.1f}ms")
-                
-                # 클릭 후 빠른 확인
-                try:
-                    # 간단한 사운드 피드백
-                    import winsound
-                    winsound.Beep(2000, 50)  # 고음, 짧게
-                except:
-                    pass
+                self.log(f"🔄 모든 클릭 시도 완료! 소요시간: {actual_click_time:.1f}ms")
                 
             except ImportError:
-                self.log("❌ pyautogui가 설치되지 않았습니다.")
-                self.log("pip install pyautogui를 실행하세요.")
+                # pyautogui 없을 때 Windows API 직접 사용
+                try:
+                    import ctypes
+                    
+                    # Windows API로 직접 키보드 이벤트 전송
+                    VK_RETURN = 0x0D
+                    VK_SPACE = 0x20
+                    
+                    # Enter 키 누르기/떼기
+                    ctypes.windll.user32.keybd_event(VK_RETURN, 0, 0, 0)
+                    ctypes.windll.user32.keybd_event(VK_RETURN, 0, 2, 0)
+                    
+                    # Space 키 누르기/떼기
+                    ctypes.windll.user32.keybd_event(VK_SPACE, 0, 0, 0)  
+                    ctypes.windll.user32.keybd_event(VK_SPACE, 0, 2, 0)
+                    
+                    click_end_time = time.perf_counter()
+                    actual_click_time = (click_end_time - click_start_time) * 1000
+                    
+                    self.log(f"⚡ Windows API 직접 실행! 소요시간: {actual_click_time:.1f}ms")
+                    
+                except Exception as e:
+                    self.log(f"Windows API 실패: {e}")
+                    click_end_time = time.perf_counter()
+                    actual_click_time = (click_end_time - click_start_time) * 1000
+                    self.log(f"❌ 모든 클릭 방법 실패! 수동 클릭 필요. 소요시간: {actual_click_time:.1f}ms")
                 
         except Exception as e:
-            self.log(f"❌ 자동 클릭 오류: {e}")
-            # 오류 시에도 기본 Enter 키 시도
-            try:
-                import pyautogui
-                pyautogui.press('enter')
-                self.log("🔄 Enter 키 백업 클릭 시도")
-            except:
-                self.log("수동으로 클릭하세요!")
+            click_end_time = time.perf_counter()
+            actual_click_time = (click_end_time - click_start_time) * 1000
+            self.log(f"❌ 클릭 오류: {e} (소요시간: {actual_click_time:.1f}ms)")
+            self.log("🔄 수동으로 클릭하세요!")
     
     def stop_macro(self):
         """매크로 중지"""
