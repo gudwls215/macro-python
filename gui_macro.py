@@ -18,6 +18,8 @@ import ctypes
 from ctypes import wintypes
 import subprocess
 import os
+import json
+import logging
 
 
 class TimeSyncMacroGUI:
@@ -35,11 +37,51 @@ class TimeSyncMacroGUI:
         self.browser_opened = False
         self.timing_adjustments = []  # 타이밍 조정 히스토리
         
+        # 로깅 시스템 초기화
+        self.setup_logging()
+        
         # Windows 고해상도 타이머 설정
         self.setup_high_resolution_timer()
         
         self.create_widgets()
         self.start_log_processor()
+    
+    def setup_logging(self):
+        """로깅 시스템 설정"""
+        # logs 폴더가 없으면 생성
+        logs_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        os.makedirs(logs_dir, exist_ok=True)
+        
+        # 로그 파일명 (날짜별로 생성)
+        log_filename = f"timing_sync_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        self.log_file_path = os.path.join(logs_dir, log_filename)
+        
+        # 로거 설정
+        self.logger = logging.getLogger('TimingSyncMacro')
+        self.logger.setLevel(logging.DEBUG)
+        
+        # 파일 핸들러 (상세 로그)
+        file_handler = logging.FileHandler(self.log_file_path, encoding='utf-8')
+        file_handler.setLevel(logging.DEBUG)
+        
+        # 포맷터 설정
+        formatter = logging.Formatter(
+            '%(asctime)s.%(msecs)03d | %(levelname)8s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        file_handler.setFormatter(formatter)
+        
+        # 핸들러 추가
+        self.logger.addHandler(file_handler)
+        
+        # 초기 로그 기록
+        self.logger.info("="*80)
+        self.logger.info("정밀 구매 타이밍 매크로 v2.0 시작")
+        self.logger.info(f"프로그램 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        self.logger.info("="*80)
+        
+        self.log_file_path = log_filename
+        self.log(f"📄 로그 파일 생성: {log_filename}")
     
     def setup_high_resolution_timer(self):
         """Windows 고해상도 타이머 설정"""
@@ -174,6 +216,12 @@ class TimeSyncMacroGUI:
         
         ttk.Button(button_frame2, text="로그 지우기", 
                   command=self.clear_log).pack(side=tk.RIGHT, padx=5)
+        
+        ttk.Button(button_frame2, text="로그 파일 열기", 
+                  command=self.open_log_file).pack(side=tk.RIGHT, padx=5)
+        
+        ttk.Button(button_frame2, text="요약 리포트", 
+                  command=self.export_timing_summary).pack(side=tk.RIGHT, padx=5)
         
         # 구매 버튼 위치 저장 변수
         self.purchase_button_pos = None
@@ -402,11 +450,19 @@ class TimeSyncMacroGUI:
         threading.Thread(target=sync_thread, daemon=True).start()
     
     def measure_server_time_offset(self, url, num_samples):
-        """서버 시간 동기화 측정 (초정밀 버전)"""
+        """서버 시간 동기화 측정 (초정밀 버전 + 상세 로깅)"""
         offsets = []
         latencies = []
         
         self.log(f"정밀 시간 동기화 시작... (총 {num_samples}회 측정)")
+        
+        # 로그 파일에 동기화 세션 시작 기록
+        self.logger.info("="*60)
+        self.logger.info(f"서버 시간 동기화 세션 시작")
+        self.logger.info(f"대상 URL: {url}")
+        self.logger.info(f"측정 횟수: {num_samples}회")
+        self.logger.info(f"세션 시작 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+        self.logger.info("-"*60)
         
         for i in range(num_samples):
             try:
@@ -419,11 +475,14 @@ class TimeSyncMacroGUI:
                 for attempt in range(3):
                     try:
                         local_before_real = time.time()
+                        local_before_precise = time.perf_counter()
                         
                         with urlopen(url, timeout=5) as response:
                             local_after_real = time.time()
+                            local_after_precise = time.perf_counter()
                             
-                            latency = (local_after_real - local_before_real) / 2
+                            # 정밀한 지연시간 계산
+                            latency = (local_after_precise - local_before_precise) / 2
                             
                             server_time_str = response.headers.get('Date')
                             if server_time_str:
@@ -455,15 +514,20 @@ class TimeSyncMacroGUI:
                                         best_latency = latency
                                         best_offset = offset
                                         best_measurement = {
+                                            'sample': i + 1,
+                                            'attempt': attempt + 1,
                                             'latency': latency,
                                             'offset': offset,
-                                            'timestamp': local_before_real,
+                                            'local_before': local_before_real,
+                                            'local_after': local_after_real,
                                             'server_time': server_timestamp,
                                             'server_time_str': server_time_str,
-                                            'attempt': attempt + 1
+                                            'local_timestamp_at_server': local_timestamp_at_server,
+                                            'response_time': (local_after_precise - local_before_precise) * 1000  # ms
                                         }
                     
                     except Exception as e:
+                        self.logger.warning(f"측정 {i+1} 시도 {attempt+1} 실패: {e}")
                         continue
                     
                     # 아주 짧은 간격으로 재시도
@@ -474,20 +538,33 @@ class TimeSyncMacroGUI:
                     offsets.append(best_offset)
                     self.measurement_history.append(best_measurement)
                     
+                    # 로그 파일에 상세 측정 결과 기록
+                    self.logger.info(f"측정 {i+1:2d}/{num_samples} | "
+                                   f"지연: {best_latency*1000:6.1f}ms | "
+                                   f"오프셋: {best_offset*1000:+7.1f}ms | "
+                                   f"응답시간: {best_measurement['response_time']:6.1f}ms | "
+                                   f"시도: {best_measurement['attempt']}/3")
+                    
+                    # JSON 형태로 상세 데이터도 기록
+                    self.logger.debug(f"측정 {i+1} 상세: {json.dumps(best_measurement, default=str, indent=None)}")
+                    
                     # 상세 로그 (매 5회마다)
                     if (i + 1) % 5 == 0 or i == 0:
-                        local_time_str = datetime.fromtimestamp(best_measurement['timestamp'] + best_latency).strftime('%H:%M:%S.%f')[:-3]
+                        local_time_str = datetime.fromtimestamp(best_measurement['local_timestamp_at_server']).strftime('%H:%M:%S.%f')[:-3]
                         server_time_display = datetime.fromtimestamp(best_measurement['server_time']).strftime('%H:%M:%S.%f')[:-3]
                         
                         self.log(f"측정 {i+1}/{num_samples}: 지연 {best_latency*1000:.1f}ms, 시간차 {best_offset*1000:+.1f}ms (시도 {best_measurement['attempt']}/3)")
                         if i == 0:  # 첫 번째 측정만 상세 표시
                             self.log(f"  로컬: {local_time_str}, 서버: {server_time_display}")
+                else:
+                    self.logger.warning(f"측정 {i+1} 완전 실패: 모든 시도에서 측정 불가")
                 
                 # 측정 간격 (더 정밀하게)
                 self.precise_sleep(0.02)  # 20ms 간격
                 
             except Exception as e:
                 self.log(f"측정 {i+1} 실패: {e}")
+                self.logger.error(f"측정 {i+1} 실패: {e}")
                 continue
         
         if offsets and latencies:
@@ -529,6 +606,37 @@ class TimeSyncMacroGUI:
                     offset_std = statistics.stdev(clean_offsets) if len(clean_offsets) > 1 else 0
                     latency_std = statistics.stdev(clean_latencies) if len(clean_latencies) > 1 else 0
                     
+                    # 동기화 결과를 로그 파일에 상세 기록
+                    sync_result = {
+                        'timestamp': datetime.now().isoformat(),
+                        'total_samples': num_samples,
+                        'valid_samples': len(clean_offsets),
+                        'filtered_samples': len(offsets) - len(clean_offsets),
+                        'final_server_offset_ms': self.server_time_offset * 1000,
+                        'final_network_latency_ms': self.network_latency * 1000,
+                        'offset_std_dev_ms': offset_std * 1000,
+                        'latency_std_dev_ms': latency_std * 1000,
+                        'estimated_accuracy_ms': (offset_std + latency_std) * 1000,
+                        'raw_offsets_ms': [o * 1000 for o in offsets],
+                        'raw_latencies_ms': [l * 1000 for l in latencies],
+                        'clean_offsets_ms': [o * 1000 for o in clean_offsets],
+                        'clean_latencies_ms': [l * 1000 for l in clean_latencies]
+                    }
+                    
+                    self.logger.info("-"*60)
+                    self.logger.info("동기화 결과 통계:")
+                    self.logger.info(f"  전체 측정: {num_samples}회 → 유효: {len(clean_offsets)}회 (필터링: {len(offsets) - len(clean_offsets)}회)")
+                    self.logger.info(f"  서버 시간차: {self.server_time_offset*1000:+.3f}ms ± {offset_std*1000:.3f}ms")
+                    self.logger.info(f"  네트워크 지연: {self.network_latency*1000:.3f}ms ± {latency_std*1000:.3f}ms")
+                    self.logger.info(f"  예상 정확도: ±{(offset_std + latency_std)*1000:.3f}ms")
+                    self.logger.info(f"  오프셋 범위: {min(clean_offsets)*1000:+.1f} ~ {max(clean_offsets)*1000:+.1f}ms")
+                    self.logger.info(f"  지연 범위: {min(clean_latencies)*1000:.1f} ~ {max(clean_latencies)*1000:.1f}ms")
+                    
+                    # JSON 형태로 상세 통계 저장
+                    self.logger.debug(f"동기화 상세 통계: {json.dumps(sync_result, indent=2)}")
+                    
+                    self.logger.info("="*60)
+                    
                     # 상세 결과 로그
                     self.log("=" * 50)
                     self.log("🎯 정밀 동기화 완료!")
@@ -536,10 +644,12 @@ class TimeSyncMacroGUI:
                     self.log(f"🌐 서버 시간차: {self.server_time_offset*1000:+.1f}ms (±{offset_std*1000:.1f}ms)")
                     self.log(f"⚡ 네트워크 지연: {self.network_latency*1000:.1f}ms (±{latency_std*1000:.1f}ms)")
                     self.log(f"🔬 예상 정확도: ±{(offset_std + latency_std)*1000:.1f}ms")
+                    self.log(f"📄 로그 저장됨: {self.log_file_path}")
                     self.log("=" * 50)
                     
                     return True
-        
+                
+        self.logger.error("동기화 실패: 유효한 측정값이 없음")
         return False
     
     def start_macro(self):
@@ -611,53 +721,63 @@ class TimeSyncMacroGUI:
                         self.log(f"남은 시간: {time_until_target:.3f}초")
                     
                     # 정밀 타이밍 진입 (네트워크 지연보다 조금 더 일찍)
-                    if time_until_target <= (self.network_latency + 0.05):  # 50ms 여유
-                        self.log(f"정밀 타이밍 모드 진입! (지연보정: {self.network_latency*1000:.1f}ms)")
+                    if time_until_target <= (self.network_latency + 0.1):  # 100ms 여유로 확대
+                        self.log(f"정밀 타이밍 모드 진입! (네트워크지연: {self.network_latency*1000:.1f}ms)")
                         
-                        # 매우 정밀한 대기 - 목표 시간에서 네트워크 지연을 뺀 시점까지
-                        # 중요: 예상 도착 시간이 목표 시간보다 5~15ms 늦게 도착하도록 조정
-                        base_target_delay_ms = 10  # 기본 목표: 10ms 늦게 도착
-                        
-                        # 이전 실행 결과를 바탕으로 동적 조정
+                        # 이전 실행 결과를 바탕으로 동적 조정 (더 강력하게)
                         adjustment = 0
                         if hasattr(self, 'timing_adjustments') and len(self.timing_adjustments) > 0:
-                            # 최근 3회 평균을 사용해 조정
+                            # 최근 3회 평균을 사용해 강력하게 보정
                             recent_results = self.timing_adjustments[-3:]
                             avg_error = sum(recent_results) / len(recent_results)
-                            adjustment = -avg_error * 0.5  # 오차의 50%를 보정
+                            adjustment = -avg_error * 0.8  # 오차의 80%를 보정 (더 강력)
                             self.log(f"📈 동적 조정: {adjustment:+.1f}ms (최근 평균 오차: {avg_error:+.1f}ms)")
                         
-                        target_delay_ms = base_target_delay_ms + adjustment
-                        target_delay_ms = max(5, min(15, target_delay_ms))  # 5~15ms 범위 제한
-                        target_delay = target_delay_ms / 1000.0
+                        # 목표: 서버에 10ms 늦게 도착하도록 설정
+                        target_arrival_delay_ms = 10 + adjustment
+                        target_arrival_delay_ms = max(5, min(20, target_arrival_delay_ms))  # 5~20ms 범위
+                        target_arrival_delay = target_arrival_delay_ms / 1000.0
                         
-                        # 클릭 실행 시간 예상 (pyautogui 처리 시간)
-                        click_execution_time = 0.003  # 3ms로 줄임 (더 정확한 예상값)
+                        # 실제 측정된 클릭 실행 시간 반영 및 동적 조정
+                        if hasattr(self, 'execution_time_history') and len(self.execution_time_history) > 0:
+                            # 최근 실행 시간들의 평균 사용
+                            recent_times = self.execution_time_history[-5:]  # 최근 5회
+                            click_execution_time = sum(recent_times) / len(recent_times)
+                            self.log(f"🕐 동적 실행시간: {click_execution_time*1000:.1f}ms (최근 {len(recent_times)}회 평균)")
+                        else:
+                            click_execution_time = 0.088  # 초기 추정값 (이전 로그 기준)
+                            self.log(f"🕐 초기 실행시간: {click_execution_time*1000:.1f}ms (추정값)")
                         
-                        # 안전 검증: 네트워크 지연이 너무 크면 경고
-                        if self.network_latency > 0.1:  # 100ms 이상
-                            self.log(f"⚠️ 경고: 네트워크 지연이 큽니다 ({self.network_latency*1000:.1f}ms)")
-                            self.log("정확한 타이밍이 어려울 수 있습니다. 동기화를 다시 시도하세요.")
+                        # ⭐ 핵심 수정: 서버 시간 기준으로 직접 계산
+                        # 목표 도착 시간 = target_timestamp + target_arrival_delay
+                        target_arrival_time = target_timestamp + target_arrival_delay
                         
-                        # 최종 클릭 시점 계산: 목표시간 - 네트워크지연 - 실행시간 + 목표지연
-                        precise_target_time = target_timestamp - self.network_latency - click_execution_time + target_delay
+                        # 클릭해야 할 서버 시간 = 목표 도착 시간 - 네트워크 지연 - 클릭 실행 시간
+                        required_server_click_time = target_arrival_time - self.network_latency - click_execution_time
                         
-                        # 검증: 클릭 시간이 현재 시간보다 과거면 즉시 실행
-                        current_server_time = time.time() + self.server_time_offset
-                        if precise_target_time + self.server_time_offset <= current_server_time:
-                            self.log("⚠️ 경고: 목표 시간이 이미 지났습니다. 즉시 실행합니다.")
-                            precise_target_time = current_server_time - self.server_time_offset
+                        # 로컬 시간으로 변환 (서버 시간 - 오프셋)
+                        precise_target_time = required_server_click_time - self.server_time_offset
                         
-                        predicted_arrival = precise_target_time + click_execution_time + self.network_latency + self.server_time_offset
+                        # 안전 검증
+                        current_local_time = time.time()
+                        if precise_target_time <= current_local_time:
+                            self.log("⚠️ 경고: 계산된 클릭 시간이 이미 지났습니다!")
+                            # 최소 지연으로 즉시 실행
+                            precise_target_time = current_local_time + 0.001
+                            required_server_click_time = precise_target_time + self.server_time_offset
+                            target_arrival_time = required_server_click_time + self.network_latency + click_execution_time
                         
-                        self.log(f"🎯 클릭 목표 시간: {datetime.fromtimestamp(precise_target_time + self.server_time_offset).strftime('%H:%M:%S.%f')[:-3]}")
-                        self.log(f"📡 예상 도착 시간: {datetime.fromtimestamp(predicted_arrival).strftime('%H:%M:%S.%f')[:-3]}")
-                        self.log(f"⏱️ 목표 지연: +{target_delay_ms}ms")
+                        # 예상 도착 시간 계산 검증
+                        predicted_arrival = required_server_click_time + click_execution_time + self.network_latency
                         
-                        # 정밀한 busy wait
+                        self.log(f"🎯 클릭 목표 시간 (서버): {datetime.fromtimestamp(required_server_click_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"📡 예상 도착 시간 (서버): {datetime.fromtimestamp(predicted_arrival).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"⏱️ 목표 도착 지연: +{target_arrival_delay_ms:.1f}ms")
+                        
+                        # 정밀한 busy wait (로컬 시간 기준)
                         while True:
-                            current_precise_time = time.time() + self.server_time_offset
-                            remaining = precise_target_time + self.server_time_offset - current_precise_time
+                            current_local_time = time.time()
+                            remaining = precise_target_time - current_local_time
                             
                             if remaining <= 0:
                                 break
@@ -687,21 +807,29 @@ class TimeSyncMacroGUI:
                         actual_execution_time = execution_end_time - execution_start_time
                         
                         # 정확한 서버 시간 계산
-                        actual_server_time = execution_start_time + self.server_time_offset
-                        predicted_arrival_time = actual_server_time + self.network_latency
+                        actual_server_click_time = execution_start_time + self.server_time_offset
+                        actual_arrival_time = actual_server_click_time + actual_execution_time + self.network_latency
                         
                         # 시간 차이 계산 (ms 단위)
-                        target_vs_predicted_diff = (predicted_arrival_time - target_timestamp) * 1000
-                        target_vs_execution_diff = (actual_server_time - target_timestamp) * 1000
+                        click_delay_ms = (actual_server_click_time - target_timestamp) * 1000
+                        arrival_delay_ms = (actual_arrival_time - target_timestamp) * 1000
+                        
+                        # 디버그 정보
+                        self.log(f"🔍 디버그 정보:")
+                        self.log(f"  목표 시간: {target_timestamp:.3f}")
+                        self.log(f"  실제 클릭(서버): {actual_server_click_time:.3f}")  
+                        self.log(f"  실제 도착(예상): {actual_arrival_time:.3f}")
+                        self.log(f"  클릭 실행시간: {actual_execution_time:.3f}s")
+                        self.log(f"  네트워크 지연: {self.network_latency:.3f}s")
                         
                         # 결과 검증
                         timing_status = "🔴 타이밍 오류"
-                        if predicted_arrival_time < target_timestamp:
+                        if actual_arrival_time < target_timestamp:
                             timing_status = "🔴 너무 빠름! (도착시간이 목표시간보다 빠름)"
-                        elif target_vs_predicted_diff > 20:
+                        elif arrival_delay_ms > 20:
                             timing_status = "🔴 너무 늦음! (20ms 초과)"
-                        elif 0 <= target_vs_predicted_diff <= 20:
-                            if target_vs_predicted_diff <= 10:
+                        elif 0 <= arrival_delay_ms <= 20:
+                            if arrival_delay_ms <= 10:
                                 timing_status = "🟢 완벽! (±10ms 이내)"
                             else:
                                 timing_status = "🟡 양호 (20ms 이내)"
@@ -710,19 +838,19 @@ class TimeSyncMacroGUI:
                         self.log("📊 정밀 타이밍 분석 결과")
                         self.log("=" * 70)
                         self.log(f"🎯 목표 시간: {datetime.fromtimestamp(target_timestamp).strftime('%H:%M:%S.%f')[:-3]}")
-                        self.log(f"🚀 실제 클릭 (서버): {datetime.fromtimestamp(actual_server_time).strftime('%H:%M:%S.%f')[:-3]}")
-                        self.log(f"📡 예상 도착 (서버): {datetime.fromtimestamp(predicted_arrival_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"🚀 실제 클릭 (서버): {datetime.fromtimestamp(actual_server_click_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"📡 예상 도착 (서버): {datetime.fromtimestamp(actual_arrival_time).strftime('%H:%M:%S.%f')[:-3]}")
                         self.log(f"")
                         self.log(f"⚡ 클릭 실행 시간: {actual_execution_time*1000:.1f}ms")
-                        self.log(f"⏱️ 클릭 지연: {target_vs_execution_diff:+.1f}ms")
-                        self.log(f"🌐 도착 지연: {target_vs_predicted_diff:+.1f}ms")
+                        self.log(f"⏱️ 클릭 지연: {click_delay_ms:+.1f}ms")
+                        self.log(f"🌐 도착 지연: {arrival_delay_ms:+.1f}ms")
                         self.log(f"📊 상태: {timing_status}")
                         
                         # 조건 검증 로그
                         self.log("=" * 70)
                         self.log("✅ 조건 검증")
-                        condition1 = predicted_arrival_time >= target_timestamp
-                        condition2 = target_vs_predicted_diff <= 20
+                        condition1 = actual_arrival_time >= target_timestamp
+                        condition2 = arrival_delay_ms <= 20
                         
                         self.log(f"조건1 (도착≥목표): {'✅ 통과' if condition1 else '❌ 실패'}")
                         self.log(f"조건2 (20ms이내): {'✅ 통과' if condition2 else '❌ 실패'}")
@@ -730,16 +858,59 @@ class TimeSyncMacroGUI:
                         if condition1 and condition2:
                             self.log("🎉 모든 조건 만족!")
                         else:
-                            self.log("⚠️ 조건 불만족 - 동기화를 다시 하거나 설정을 확인하세요")
+                            self.log("⚠️ 조건 불만족 - 다시 실행하면 자동으로 조정됩니다")
                         
                         # 결과를 히스토리에 저장 (다음 실행 시 동적 조정용)
                         if not hasattr(self, 'timing_adjustments'):
                             self.timing_adjustments = []
-                        self.timing_adjustments.append(target_vs_predicted_diff)
+                        if not hasattr(self, 'execution_time_history'):
+                            self.execution_time_history = []
+                        
+                        # 타이밍 오차와 실제 실행 시간 저장
+                        self.timing_adjustments.append(arrival_delay_ms)
+                        self.execution_time_history.append(actual_execution_time)
                         
                         # 히스토리는 최대 10개만 유지
                         if len(self.timing_adjustments) > 10:
                             self.timing_adjustments = self.timing_adjustments[-10:]
+                        if len(self.execution_time_history) > 10:
+                            self.execution_time_history = self.execution_time_history[-10:]
+                        
+                        # 매크로 실행 결과를 로그 파일에 상세 기록
+                        execution_result = {
+                            'timestamp': datetime.now().isoformat(),
+                            'target_time': target_timestamp,
+                            'target_datetime': datetime.fromtimestamp(target_timestamp).isoformat(),
+                            'actual_click_time': execution_start_time,
+                            'actual_server_click_time': actual_server_click_time,
+                            'actual_arrival_time': actual_arrival_time,
+                            'execution_time_ms': actual_execution_time * 1000,
+                            'click_delay_ms': click_delay_ms,
+                            'arrival_delay_ms': arrival_delay_ms,
+                            'network_latency_ms': self.network_latency * 1000,
+                            'server_time_offset_ms': self.server_time_offset * 1000,
+                            'timing_status': timing_status,
+                            'condition1_pass': condition1,
+                            'condition2_pass': condition2,
+                            'adjustment_used_ms': adjustment,
+                            'target_arrival_delay_ms': target_arrival_delay_ms,
+                            'predicted_execution_time_ms': click_execution_time * 1000,
+                            'actual_vs_predicted_execution_diff_ms': (actual_execution_time - click_execution_time) * 1000
+                        }
+                        
+                        self.logger.info("="*60)
+                        self.logger.info("매크로 실행 결과")
+                        self.logger.info(f"목표 시간: {datetime.fromtimestamp(target_timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                        self.logger.info(f"실제 클릭: {datetime.fromtimestamp(actual_server_click_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} (서버시간)")
+                        self.logger.info(f"예상 도착: {datetime.fromtimestamp(actual_arrival_time).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]} (서버시간)")
+                        self.logger.info(f"클릭 지연: {click_delay_ms:+.3f}ms | 도착 지연: {arrival_delay_ms:+.3f}ms")
+                        self.logger.info(f"실행 시간: {actual_execution_time*1000:.3f}ms (예상: {click_execution_time*1000:.3f}ms)")
+                        self.logger.info(f"조건1 (도착≥목표): {'PASS' if condition1 else 'FAIL'} | 조건2 (≤20ms): {'PASS' if condition2 else 'FAIL'}")
+                        self.logger.info(f"전체 결과: {'SUCCESS' if condition1 and condition2 else 'FAIL'}")
+                        
+                        # JSON 형태로 상세 실행 데이터 저장
+                        self.logger.debug(f"매크로 실행 상세: {json.dumps(execution_result, indent=2)}")
+                        self.logger.info("="*60)
                         
                         # 통계 정보 표시
                         if len(self.timing_adjustments) >= 2:
@@ -751,7 +922,7 @@ class TimeSyncMacroGUI:
                         # 소리 알림 (결과에 따라)
                         try:
                             import winsound
-                            if condition1 and condition2 and target_vs_predicted_diff <= 10:
+                            if condition1 and condition2 and arrival_delay_ms <= 10:
                                 # 완벽 - 성공음 (높은음)
                                 for i in range(3):
                                     winsound.Beep(2000, 100)
@@ -922,9 +1093,80 @@ class TimeSyncMacroGUI:
         """로그 지우기"""
         self.log_text.delete(1.0, tk.END)
     
+    def open_log_file(self):
+        """로그 파일 열기"""
+        try:
+            if hasattr(self, 'log_file_path') and os.path.exists(self.log_file_path):
+                # Windows에서 기본 텍스트 에디터로 열기
+                os.startfile(self.log_file_path)
+                self.log(f"📄 로그 파일을 열었습니다: {self.log_file_path}")
+            else:
+                messagebox.showwarning("경고", "로그 파일을 찾을 수 없습니다.")
+        except Exception as e:
+            self.log(f"❌ 로그 파일 열기 실패: {e}")
+            messagebox.showerror("오류", f"로그 파일 열기 실패:\n{e}")
+    
+    def export_timing_summary(self):
+        """타이밍 요약 리포트 내보내기"""
+        try:
+            if not hasattr(self, 'timing_adjustments') or len(self.timing_adjustments) == 0:
+                messagebox.showwarning("경고", "실행 히스토리가 없습니다.")
+                return
+                
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"timing_summary_{timestamp}.json"
+            
+            # 통계 계산
+            avg_error = sum(self.timing_adjustments) / len(self.timing_adjustments)
+            std_error = statistics.stdev(self.timing_adjustments) if len(self.timing_adjustments) > 1 else 0
+            
+            avg_execution = sum(self.execution_time_history) / len(self.execution_time_history) if hasattr(self, 'execution_time_history') and len(self.execution_time_history) > 0 else 0
+            
+            summary_data = {
+                'export_time': datetime.now().isoformat(),
+                'server_time_offset_ms': self.server_time_offset * 1000 if hasattr(self, 'server_time_offset') else 0,
+                'network_latency_ms': self.network_latency * 1000 if hasattr(self, 'network_latency') else 0,
+                'execution_count': len(self.timing_adjustments),
+                'average_error_ms': avg_error,
+                'error_std_dev_ms': std_error,
+                'average_execution_time_ms': avg_execution * 1000,
+                'success_rate': len([x for x in self.timing_adjustments if 0 <= x <= 20]) / len(self.timing_adjustments) * 100,
+                'timing_errors_ms': self.timing_adjustments,
+                'execution_times_ms': [t * 1000 for t in self.execution_time_history] if hasattr(self, 'execution_time_history') else []
+            }
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump(summary_data, f, indent=2, ensure_ascii=False)
+            
+            self.log(f"📊 타이밍 요약 리포트 생성: {filename}")
+            messagebox.showinfo("완료", f"타이밍 요약 리포트가 생성되었습니다:\n{filename}")
+            
+        except Exception as e:
+            error_msg = f"요약 리포트 생성 실패: {e}"
+            self.log(f"❌ {error_msg}")
+            messagebox.showerror("오류", error_msg)
+    
     def run(self): 
         """GUI 실행"""
-        self.root.mainloop()
+        try:
+            self.root.mainloop()
+        finally:
+            # 프로그램 종료 시 로그 정리
+            if hasattr(self, 'logger'):
+                self.logger.info("="*60)
+                self.logger.info("프로그램 종료")
+                self.logger.info(f"종료 시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                if hasattr(self, 'timing_adjustments') and len(self.timing_adjustments) > 0:
+                    avg_error = sum(self.timing_adjustments) / len(self.timing_adjustments)
+                    success_count = len([x for x in self.timing_adjustments if 0 <= x <= 20])
+                    self.logger.info(f"세션 통계: 실행 {len(self.timing_adjustments)}회, 성공 {success_count}회 ({success_count/len(self.timing_adjustments)*100:.1f}%)")
+                    self.logger.info(f"평균 오차: {avg_error:+.1f}ms")
+                self.logger.info("="*60)
+                
+                # 로거 정리
+                for handler in self.logger.handlers[:]:
+                    handler.close()
+                    self.logger.removeHandler(handler)
 
 
 def main():
