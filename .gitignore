@@ -1,4 +1,8 @@
-# Python
+# ===========================================
+# 정밀 구매 타이밍 매크로 v2.0 - .gitignore
+# ===========================================
+
+# ===== Python 기본 =====
 __pycache__/
 *.py[cod]
 *$py.class
@@ -21,8 +25,12 @@ share/python-wheels/
 .installed.cfg
 *.egg
 PIPFILE.lock
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
 
-# Virtual Environment
+# ===== 가상환경 =====
 venv/
 env/
 ENV/
@@ -30,14 +38,49 @@ env.bak/
 venv.bak/
 .venv/
 
-# IDE
+# ===== PyInstaller 빌드 =====
+build/
+dist/
+*.spec
+*.manifest
+*.exe
+*.msi
+*.app
+*.dmg
+.cache/
+.eggs/
+*.egg-info/
+
+# ===== 빌드 스크립트 =====
+# build.bat
+# quick_build.bat
+# optimized_build.bat
+# create_release.bat
+# build_config.spec
+install.bat
+uninstall.bat
+setup.exe
+
+# ===== 배포 패키지 =====
+*.zip
+*.rar
+*.7z
+*.tar.gz
+*_Release/
+*_Package/
+PrecisionTimingMacro_*/
+Release_*/
+Package_*/
+installer_*/
+
+# ===== IDE 설정 =====
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
 
-# OS
+# ===== 운영체제 =====
 .DS_Store
 .DS_Store?
 ._*
@@ -46,84 +89,133 @@ venv.bak/
 ehthumbs.db
 Thumbs.db
 desktop.ini
-
-# Windows
 *.tmp
 *.temp
-*.log
 
-# 매크로 관련 임시 파일
+# ===== 로그 및 디버그 =====
+logs/
+log_*/
+*.log
+*.log.*
+build.log
+pyinstaller.log
+compiler.log
+crash_*/
+*.dmp
+*.dump
+memory_*/
+core.*
+
+# ===== 매크로 관련 임시 파일 =====
 temp_click.vbs
 *.vbs
-screenshot*.png
+screenshot_*.png
+debug_*.png
+capture_*.png
+click_*.png
 timing_log.txt
 
-# 설정 파일 (민감한 정보 포함 가능)
+# ===== 설정 파일 (민감한 정보) =====
 config.json
 settings.ini
 *.conf
+user_settings.json
+button_positions.json
+timing_history.json
+local_config.py
+test_config.py
+debug_config.py
 
-# 테스트 결과
+# ===== 테스트 및 성능 =====
 test_results/
-logs/
 *.test
+performance_*.json
+timing_*.csv
+benchmark_*.txt
+network_test_*/
+latency_*.json
+ping_*.txt
+*.prof
+*.profile
+profiling_*/
 
-# Chrome Driver
+# ===== 웹드라이버 =====
 chromedriver.exe
 chromedriver
 geckodriver.exe
 geckodriver
-
-# Selenium 캐시
+chromedriver_*/
+geckodriver_*/
+driver_*/
 .wdm/
 webdriver_manager/
 
-# 사용자별 설정
-user_settings.json
-button_positions.json
-timing_history.json
-
-# 패키지 관리
-requirements.txt.bak
+# ===== 패키지 관리 =====
+# requirements.txt.bak  # 백업 파일만 제외
 pip-log.txt
 pip-delete-this-directory.txt
+requirements-dev.txt
+requirements-test.txt
+requirements-prod.txt
+Pipfile.lock
+poetry.lock
 
-# 컴파일된 C++ 파일 (precision timer)
-*.exe
-*.dll
-*.obj
-*.o
-*.lib
-*.pdb
-
-# 백업 파일
+# ===== 백업 파일 =====
 *.bak
 *.backup
 *_backup.*
 *_old.*
+# README_*.md  # README 변형 파일들은 포함할 수 있음
+# INSTALL_*.md  # 설치 가이드 변형들도 포함
+*.md.bak
 
-# 런타임 생성 파일
-*.pyc
-*.pyo
-*.pyd
-__pycache__/
-.pytest_cache/
-
-# Jupyter Notebook
-.ipynb_checkpoints
-
-# 환경 변수
+# ===== 환경 변수 =====
 .env
 .env.local
 .env.development
 .env.test
 .env.production
 
-# 사용자 데이터
+# ===== 사용자 데이터 =====
 user_data/
 personal/
 private/
-
-# 서버 응답 캐시
 server_cache/
 response_cache/
+
+# ===== Jupyter Notebook =====
+.ipynb_checkpoints
+
+# ===== 보안 관련 =====
+*.pfx
+*.p12
+*.cer
+*.crt
+*.key
+certificates/
+LICENSE_private.txt
+license_key.txt
+activation_*/
+
+# ===== 임시 및 기타 =====
+temp_*/
+tmp_*/
+.build_timestamp
+build_info.json
+dependencies.txt
+imports.txt
+modules.txt
+# version_info.txt  # 버전 정보는 포함
+icon.ico
+*.icon
+*.upx
+upx.exe
+
+# ===== Git 관련 =====
+*.orig
+*.rej
+
+# ===== 문서 및 매뉴얼 =====
+user_guide_*/
+manual_*/
+help_*/
