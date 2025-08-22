@@ -56,6 +56,14 @@ class TimeSyncMacroGUI:
         self.measurement_history = []  # 측정 히스토리 저장
         self.browser_opened = False
         self.timing_adjustments = []  # 타이밍 조정 히스토리
+        self.execution_time_history = [0.500]  # 클릭 실행시간 히스토리 (실측값 500ms로 초기화)
+        
+        # 누적 동기화 데이터 (새로 추가)
+        self.cumulative_measurements = []  # 모든 동기화 세션의 측정값 누적
+        self.session_count = 0  # 동기화 세션 횟수
+        self.cumulative_server_offset = 0  # 누적 평균 서버 오프셋
+        self.cumulative_network_latency = 0  # 누적 평균 네트워크 지연
+        self.offset_stability = 0  # 오프셋 안정성 (표준편차)
         
         # 구매 버튼 위치 관련 변수들
         self.purchase_button_positions = []  # 여러 좌표 저장
@@ -65,11 +73,17 @@ class TimeSyncMacroGUI:
         # 로깅 시스템 초기화
         self.setup_logging()
         
+        # 누적 동기화 데이터 로드
+        self.load_cumulative_data()
+        
         # Windows 고해상도 타이머 설정
         self.setup_high_resolution_timer()
         
         self.create_widgets()
         self.start_log_processor()
+        
+        # 프로그램 종료 시 누적 데이터 저장
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
     
     def setup_logging(self):
         """로깅 시스템 설정"""
@@ -240,9 +254,26 @@ class TimeSyncMacroGUI:
         ttk.Label(info_frame, text="측정 횟수:").grid(row=4, column=0, sticky=tk.W)
         ttk.Label(info_frame, textvariable=self.measurement_count_var).grid(row=4, column=1, sticky=tk.W)
         
+        # 누적 동기화 정보 표시 (새로 추가)
+        ttk.Separator(info_frame, orient='horizontal').grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        
+        ttk.Label(info_frame, text="📊 누적 동기화 통계", font=("맑은 고딕", 9, "bold")).grid(row=6, column=0, columnspan=2, sticky=tk.W)
+        
+        self.session_count_var = tk.StringVar(value="0")
+        ttk.Label(info_frame, text="동기화 세션:").grid(row=7, column=0, sticky=tk.W)
+        ttk.Label(info_frame, textvariable=self.session_count_var).grid(row=7, column=1, sticky=tk.W)
+        
+        self.cumulative_offset_var = tk.StringVar(value="-")
+        ttk.Label(info_frame, text="누적 평균 오프셋:").grid(row=8, column=0, sticky=tk.W)
+        ttk.Label(info_frame, textvariable=self.cumulative_offset_var).grid(row=8, column=1, sticky=tk.W)
+        
+        self.stability_var = tk.StringVar(value="-")
+        ttk.Label(info_frame, text="오프셋 안정성:").grid(row=9, column=0, sticky=tk.W)
+        ttk.Label(info_frame, textvariable=self.stability_var).grid(row=9, column=1, sticky=tk.W)
+        
         # 현재 시간 표시 (개선된 세로 배치)
         time_frame = ttk.LabelFrame(info_frame, text="실시간 시간", padding="5")
-        time_frame.grid(row=5, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        time_frame.grid(row=10, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
         # 서버 시간
         self.server_time_var = tk.StringVar()
@@ -694,6 +725,16 @@ class TimeSyncMacroGUI:
                 latency_std = statistics.stdev(clean_latencies) if len(clean_latencies) > 1 else 0
                 offset_std = statistics.stdev(clean_offsets) if len(clean_offsets) > 1 else 0
                 
+                # 누적 데이터에 측정값 추가
+                session_measurements = []
+                for m in clean_measurements:
+                    session_measurements.append({
+                        'offset': m['offset'],
+                        'latency': m['latency'],
+                        'method': 'second_change_catch'
+                    })
+                self.update_cumulative_sync_data(session_measurements)
+                
                 # 결과 로깅
                 self.log("=" * 60)
                 self.log("🎯 초 변화 순간 캐치 동기화 완료!")
@@ -722,6 +763,198 @@ class TimeSyncMacroGUI:
         
         self.log("❌ 초 변화 순간 캐치 동기화 실패!")
         return False
+    
+    def update_cumulative_sync_data(self, session_measurements):
+        """누적 동기화 데이터 업데이트"""
+        if not session_measurements:
+            return
+        
+        # 세션 카운트 증가
+        self.session_count += 1
+        
+        # 이번 세션의 측정값들을 누적 데이터에 추가
+        for measurement in session_measurements:
+            measurement_data = {
+                'session': self.session_count,
+                'timestamp': time.time(),
+                'offset': measurement.get('offset', 0),
+                'latency': measurement.get('latency', 0),
+                'method': measurement.get('method', 'unknown')
+            }
+            self.cumulative_measurements.append(measurement_data)
+        
+        # 누적 통계 계산
+        self.calculate_cumulative_statistics()
+        
+        # GUI 업데이트
+        self.update_cumulative_display()
+        
+        # 파일에 저장
+        self.save_cumulative_data()
+        
+        # 로그 기록
+        self.log(f"📊 누적 데이터 업데이트: {self.session_count}번째 세션, 총 {len(self.cumulative_measurements)}개 측정값")
+    
+    def calculate_cumulative_statistics(self):
+        """누적 통계 계산"""
+        if not self.cumulative_measurements:
+            return
+        
+        # 모든 오프셋과 지연시간 추출
+        all_offsets = [m['offset'] for m in self.cumulative_measurements]
+        all_latencies = [m['latency'] for m in self.cumulative_measurements]
+        
+        # 이상값 제거 (IQR 방법 사용)
+        def remove_outliers_iqr(data):
+            if len(data) < 4:
+                return data
+            
+            q1 = statistics.quantiles(data, n=4)[0]  # 25th percentile
+            q3 = statistics.quantiles(data, n=4)[2]  # 75th percentile
+            iqr = q3 - q1
+            
+            lower_bound = q1 - 1.5 * iqr
+            upper_bound = q3 + 1.5 * iqr
+            
+            return [x for x in data if lower_bound <= x <= upper_bound]
+        
+        # 이상값 제거된 데이터
+        clean_offsets = remove_outliers_iqr(all_offsets)
+        clean_latencies = remove_outliers_iqr(all_latencies)
+        
+        if clean_offsets:
+            # 누적 평균 계산 (중앙값 사용 - 더 안정적)
+            self.cumulative_server_offset = statistics.median(clean_offsets)
+            self.cumulative_network_latency = statistics.median(clean_latencies)
+            
+            # 안정성 계산 (표준편차)
+            if len(clean_offsets) > 1:
+                self.offset_stability = statistics.stdev(clean_offsets)
+            else:
+                self.offset_stability = 0
+            
+            # 현재 사용 중인 값들을 누적 평균으로 업데이트
+            self.server_time_offset = self.cumulative_server_offset
+            self.network_latency = self.cumulative_network_latency
+            
+            # 상세 로그
+            self.logger.info(f"누적 통계 업데이트: 세션 {self.session_count}, "
+                           f"총 측정값 {len(self.cumulative_measurements)}개, "
+                           f"정제된 측정값 {len(clean_offsets)}개")
+            self.logger.info(f"누적 평균 오프셋: {self.cumulative_server_offset*1000:+.3f}ms")
+            self.logger.info(f"누적 평균 지연: {self.cumulative_network_latency*1000:.3f}ms")
+            self.logger.info(f"오프셋 안정성: ±{self.offset_stability*1000:.3f}ms")
+    
+    def update_cumulative_display(self):
+        """누적 동기화 정보 GUI 업데이트"""
+        # 세션 횟수
+        self.session_count_var.set(f"{self.session_count}회")
+        
+        # 누적 평균 오프셋
+        if self.cumulative_server_offset != 0:
+            self.cumulative_offset_var.set(f"{self.cumulative_server_offset*1000:+.1f}ms")
+        else:
+            self.cumulative_offset_var.set("-")
+        
+        # 안정성 (표준편차)
+        if self.offset_stability > 0:
+            stability_status = ""
+            if self.offset_stability * 1000 < 5:
+                stability_status = "🟢 매우안정"
+            elif self.offset_stability * 1000 < 10:
+                stability_status = "🟡 안정"
+            else:
+                stability_status = "🔴 불안정"
+                
+            self.stability_var.set(f"±{self.offset_stability*1000:.1f}ms {stability_status}")
+        else:
+            self.stability_var.set("-")
+    
+    def get_reliability_score(self):
+        """신뢰도 점수 계산 (0-100)"""
+        if self.session_count == 0:
+            return 0
+        
+        # 세션 횟수 점수 (최대 40점)
+        session_score = min(40, self.session_count * 8)
+        
+        # 안정성 점수 (최대 40점) - 표준편차가 낮을수록 높은 점수
+        if self.offset_stability > 0:
+            stability_ms = self.offset_stability * 1000
+            if stability_ms < 5:
+                stability_score = 40
+            elif stability_ms < 10:
+                stability_score = 30
+            elif stability_ms < 20:
+                stability_score = 20
+            else:
+                stability_score = 10
+        else:
+            stability_score = 0
+        
+        # 측정값 개수 점수 (최대 20점)
+        measurement_score = min(20, len(self.cumulative_measurements) * 2)
+        
+        total_score = session_score + stability_score + measurement_score
+        return min(100, total_score)
+    
+    def save_cumulative_data(self):
+        """누적 동기화 데이터를 파일에 저장"""
+        try:
+            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+            os.makedirs(data_dir, exist_ok=True)
+            
+            cumulative_data = {
+                'session_count': self.session_count,
+                'cumulative_measurements': self.cumulative_measurements,
+                'cumulative_server_offset': self.cumulative_server_offset,
+                'cumulative_network_latency': self.cumulative_network_latency,
+                'offset_stability': self.offset_stability,
+                'last_updated': datetime.now().isoformat()
+            }
+            
+            data_file = os.path.join(data_dir, "cumulative_sync_data.json")
+            with open(data_file, 'w', encoding='utf-8') as f:
+                json.dump(cumulative_data, f, indent=2, ensure_ascii=False)
+            
+            self.logger.info(f"누적 동기화 데이터 저장: {data_file}")
+            
+        except Exception as e:
+            self.logger.error(f"누적 데이터 저장 실패: {e}")
+    
+    def load_cumulative_data(self):
+        """누적 동기화 데이터를 파일에서 로드"""
+        try:
+            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+            data_file = os.path.join(data_dir, "cumulative_sync_data.json")
+            
+            if os.path.exists(data_file):
+                with open(data_file, 'r', encoding='utf-8') as f:
+                    cumulative_data = json.load(f)
+                
+                self.session_count = cumulative_data.get('session_count', 0)
+                self.cumulative_measurements = cumulative_data.get('cumulative_measurements', [])
+                self.cumulative_server_offset = cumulative_data.get('cumulative_server_offset', 0)
+                self.cumulative_network_latency = cumulative_data.get('cumulative_network_latency', 0)
+                self.offset_stability = cumulative_data.get('offset_stability', 0)
+                
+                # 로드된 데이터로 현재 동기화 값 설정
+                if self.cumulative_server_offset != 0:
+                    self.server_time_offset = self.cumulative_server_offset
+                    self.network_latency = self.cumulative_network_latency
+                
+                # GUI 업데이트
+                self.update_cumulative_display()
+                
+                last_updated = cumulative_data.get('last_updated', 'unknown')
+                self.log(f"📁 누적 데이터 로드 완료: {self.session_count}세션, {len(self.cumulative_measurements)}개 측정값")
+                self.log(f"📅 마지막 업데이트: {last_updated[:19]}")
+                
+                self.logger.info(f"누적 동기화 데이터 로드 완료: {data_file}")
+                
+        except Exception as e:
+            self.log("📁 이전 누적 데이터 없음 (새로 시작)")
+            self.logger.info(f"누적 데이터 로드 실패 또는 없음: {e}")
     
     def parse_server_time(self, server_time_str):
         """서버 시간 문자열을 파싱"""
@@ -962,7 +1195,19 @@ class TimeSyncMacroGUI:
                     if hasattr(self, 'measurement_history'):
                         self.measurement_count_var.set(str(len(self.measurement_history)))
                     
+                    # 누적 통계 로그 표시
+                    reliability_score = self.get_reliability_score()
                     self.log("✅ 시간 동기화 완료!")
+                    self.log(f"📊 누적 통계: {self.session_count}세션, {len(self.cumulative_measurements)}개 측정값")
+                    if self.session_count > 1:
+                        self.log(f"🎯 누적 평균 오프셋: {self.cumulative_server_offset*1000:+.1f}ms")
+                        self.log(f"📈 신뢰도 점수: {reliability_score}/100")
+                        if reliability_score >= 80:
+                            self.log("🟢 매우 높은 신뢰도 - 정밀한 타이밍 가능!")
+                        elif reliability_score >= 60:
+                            self.log("🟡 양호한 신뢰도 - 안정적인 동기화")
+                        else:
+                            self.log("🔴 낮은 신뢰도 - 추가 동기화 권장")
                 else:
                     self.sync_status.set("동기화 실패")
                     self.log("❌ 모든 동기화 방법 실패!")
@@ -1171,6 +1416,16 @@ class TimeSyncMacroGUI:
                     self.log(f"📄 로그 저장됨: {self.log_file_path}")
                     self.log("=" * 50)
                     
+                    # 누적 데이터에 측정값 추가
+                    session_measurements = []
+                    for i, offset in enumerate(clean_offsets):
+                        session_measurements.append({
+                            'offset': offset,
+                            'latency': clean_latencies[i] if i < len(clean_latencies) else 0,
+                            'method': 'traditional_multi_sample'
+                        })
+                    self.update_cumulative_sync_data(session_measurements)
+                    
                     return True
                 
         self.logger.error("동기화 실패: 유효한 측정값이 없음")
@@ -1225,9 +1480,10 @@ class TimeSyncMacroGUI:
                     elif time_until_target <= 1:
                         self.log(f"남은 시간: {time_until_target:.3f}초")
                     
-                    # 정밀 타이밍 진입 (네트워크 지연보다 조금 더 일찍)
-                    if time_until_target <= (self.network_latency + 0.1):  # 100ms 여유로 확대
-                        self.log(f"정밀 타이밍 모드 진입! (네트워크지연: {self.network_latency*1000:.1f}ms)")
+                    # 정밀 타이밍 진입 (클릭 실행시간 + 네트워크 지연보다 일찍)
+                    if time_until_target <= (self.network_latency + 0.70 + 0.1):  # 500ms + 네트워크지연 + 100ms 여유
+                        self.log(f"정밀 타이밍 모드 진입! (네트워크지연: {self.network_latency*1000:.1f}ms, 클릭실행시간: 500ms)")
+                        self.log(f"⏰ 진입 기준: {(self.network_latency + 0.70 + 0.1)*1000:.0f}ms 전")
                         
                         # 이전 실행 결과를 바탕으로 동적 조정 (더 강력하게)
                         adjustment = 0
@@ -1257,16 +1513,16 @@ class TimeSyncMacroGUI:
                                 click_execution_time = sum(recent_times) / len(recent_times)
                                 self.log(f"🕐 동적 실행시간: {click_execution_time*1000:.1f}ms (최근 {len(recent_times)}회 평균)")
                         else:
-                            # 최적화된 초기 추정값 (새로운 클릭 함수 기준)
+                            # 실제 측정된 클릭 실행 시간 반영 (500ms 기준)
                             if hasattr(self, 'purchase_button_positions') and len(self.purchase_button_positions) > 0:
                                 # 여러 좌표가 있을 때의 예상 실행시간
-                                base_time = 0.008  # 8ms (첫 번째 클릭)
-                                additional_time = len(self.purchase_button_positions) * 0.002  # 추가 클릭당 2ms
+                                base_time = 0.500  # 500ms (실제 측정값 기준)
+                                additional_time = len(self.purchase_button_positions) * 0.050  # 추가 좌표당 50ms
                                 click_execution_time = base_time + additional_time
-                                self.log(f"🕐 다중좌표 실행시간: {click_execution_time*1000:.1f}ms ({len(self.purchase_button_positions)}개 좌표)")
+                                self.log(f"🕐 다중좌표 실행시간: {click_execution_time*1000:.0f}ms ({len(self.purchase_button_positions)}개 좌표, 실측값 기준)")
                             else:
-                                click_execution_time = 0.025  # 25ms (키보드/위치 클릭)
-                                self.log(f"🕐 초기 실행시간: {click_execution_time*1000:.1f}ms (최적화 추정값)")
+                                click_execution_time = 0.500  # 500ms (실제 측정된 키보드/클릭 실행시간)
+                                self.log(f"🕐 실측 클릭 실행시간: {click_execution_time*1000:.0f}ms (500ms 기준)")
                         
                         # ⭐ 핵심 수정: 서버 시간 기준으로 직접 계산
                         # 목표 도착 시간 = target_timestamp + target_arrival_delay
@@ -1366,19 +1622,34 @@ class TimeSyncMacroGUI:
                         self.log(f"🌐 도착 지연: {arrival_delay_ms:+.1f}ms")
                         self.log(f"📊 상태: {timing_status}")
                         
-                        # 조건 검증 로그
+                        # 조건 검증 로그 (500ms 클릭 실행시간 반영)
                         self.log("=" * 70)
-                        self.log("✅ 조건 검증")
+                        self.log("✅ 조건 검증 (500ms 클릭 실행시간 고려)")
                         condition1 = actual_arrival_time >= target_timestamp
                         condition2 = arrival_delay_ms <= 20
                         
-                        self.log(f"조건1 (도착≥목표): {'✅ 통과' if condition1 else '❌ 실패'}")
-                        self.log(f"조건2 (20ms이내): {'✅ 통과' if condition2 else '❌ 실패'}")
+                        # 상세 조건 분석
+                        expected_click_time = target_timestamp - 0.500 - self.network_latency - 0.010  # 500ms + 네트워크지연 + 10ms 여유
+                        actual_click_difference = actual_server_click_time - expected_click_time
+                        
+                        self.log(f"📊 타이밍 분석:")
+                        self.log(f"  예상 클릭 시간: {datetime.fromtimestamp(expected_click_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"  실제 클릭 시간: {datetime.fromtimestamp(actual_server_click_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"  클릭 시간 차이: {actual_click_difference*1000:+.1f}ms")
+                        self.log(f"  500ms 실행 후 도착: {datetime.fromtimestamp(actual_arrival_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        
+                        self.log(f"")
+                        self.log(f"조건1 (도착≥목표): {'✅ 통과' if condition1 else '❌ 실패'} | 차이: {arrival_delay_ms:+.1f}ms")
+                        self.log(f"조건2 (20ms이내): {'✅ 통과' if condition2 else '❌ 실패'} | 허용범위: 0~20ms")
+                        self.log(f"클릭 정확도: {'✅ 정확' if abs(actual_click_difference) <= 0.05 else '⚠️ 조정필요'} | 오차: {actual_click_difference*1000:+.1f}ms")
                         
                         if condition1 and condition2:
-                            self.log("🎉 모든 조건 만족!")
+                            if arrival_delay_ms <= 10:
+                                self.log("🎉 완벽한 타이밍! (±10ms 이내)")
+                            else:
+                                self.log("🎉 양호한 타이밍! (20ms 이내)")
                         else:
-                            self.log("⚠️ 조건 불만족 - 다시 실행하면 자동으로 조정됩니다")
+                            self.log("⚠️ 조건 불만족 - 500ms 실행시간 기준으로 자동 조정됩니다")
                         
                         # 결과를 히스토리에 저장 (다음 실행 시 동적 조정용)
                         if not hasattr(self, 'timing_adjustments'):
@@ -1488,47 +1759,82 @@ class TimeSyncMacroGUI:
                 pyautogui.FAILSAFE = False  # 안전모드 완전 해제
                 pyautogui.PAUSE = 0  # 모든 대기시간 제거
                 
-                # 🎯 방법 1: 저장된 다중 좌표 동시 클릭 (최우선 - 가장 빠름)
+                # 🎯 방법 1: 저장된 다중 좌표 초고속 병렬 클릭 (최우선 - 가장 빠름)
                 if hasattr(self, 'purchase_button_positions') and len(self.purchase_button_positions) > 0:
-                    try:
-                        self.log(f"🎯 {len(self.purchase_button_positions)}개 좌표 동시 클릭 시작!")
-                        
-                        # 모든 좌표를 빠르게 연속 클릭
-                        for i, (x, y) in enumerate(self.purchase_button_positions):
-                            pyautogui.click(x, y, duration=0)
-                            self.log(f"  ⚡ 클릭 {i+1}: ({x}, {y})")
-                            
-                            # 동시성을 위해 아주 짧은 대기만
-                            if i < len(self.purchase_button_positions) - 1:
-                                time.sleep(0.001)  # 1ms만 대기
-                        
-                        click_end_time = time.perf_counter()
-                        actual_click_time = (click_end_time - click_start_time) * 1000
-                        self.log(f"🎯 다중 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
-                        return
-                        
-                    except Exception as e:
-                        self.log(f"다중 좌표 클릭 실패: {e}")
-                
-                # 🚀 방법 2: 키보드 즉시 실행 (저장된 좌표가 없을 때)
-                try:
-                    self.log("⚡ 저장된 좌표 없음 - 키보드 클릭으로 대체")
+                    self.log(f"⚡ {len(self.purchase_button_positions)}개 좌표 초고속 병렬 클릭!")
                     
-                    # Enter 키 즉시 실행 (가장 빠름)
-                    pyautogui.press('enter')
+                    # 병렬 클릭 함수
+                    def fast_click(x, y):
+                        try:
+                            pyautogui.click(x, y, duration=0)  # 즉시 클릭
+                        except:
+                            pass
                     
-                    # 백업으로 Space 키도 즉시 실행
-                    pyautogui.press('space')
+                    # 모든 좌표를 동시에 병렬 클릭
+                    import threading
+                    threads = []
+                    for x, y in self.purchase_button_positions:
+                        thread = threading.Thread(target=fast_click, args=(x, y))
+                        threads.append(thread)
+                        thread.start()
                     
-                    self.log("⚡ 키보드 즉시 실행 (Enter/Space)")
+                    # 모든 스레드 완료 대기 (최대 50ms)
+                    for thread in threads:
+                        thread.join(timeout=0.05)
                     
                     click_end_time = time.perf_counter()
                     actual_click_time = (click_end_time - click_start_time) * 1000
-                    self.log(f"🎯 키보드 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
+                    self.log(f"⚡ 병렬 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
+                    return
+                
+                # 🚀 방법 2: 키보드 + 마우스 동시 병렬 실행 (저장된 좌표가 없을 때)
+                try:
+                    self.log("⚡ 키보드+마우스 동시 병렬 클릭!")
+                    
+                    def keyboard_press():
+                        try:
+                            pyautogui.press('enter')
+                            pyautogui.press('space')
+                            # 추가 키 조합
+                            pyautogui.keyDown('enter')
+                            pyautogui.keyUp('enter')
+                        except:
+                            pass
+                    
+                    def mouse_click():
+                        try:
+                            # 화면 중앙과 몇 가지 예상 위치 클릭
+                            screen_width, screen_height = pyautogui.size()
+                            positions = [
+                                (screen_width // 2, screen_height // 2),  # 중앙
+                                (screen_width // 2, screen_height * 3 // 4),  # 하단 중앙
+                                (screen_width * 3 // 4, screen_height // 2),  # 우측 중앙
+                            ]
+                            
+                            for x, y in positions:
+                                pyautogui.click(x, y, duration=0)
+                        except:
+                            pass
+                    
+                    # 키보드와 마우스 동시 실행
+                    import threading
+                    kb_thread = threading.Thread(target=keyboard_press)
+                    mouse_thread = threading.Thread(target=mouse_click)
+                    
+                    kb_thread.start()
+                    mouse_thread.start()
+                    
+                    # 최대 30ms 대기
+                    kb_thread.join(timeout=0.03)
+                    mouse_thread.join(timeout=0.03)
+                    
+                    click_end_time = time.perf_counter()
+                    actual_click_time = (click_end_time - click_start_time) * 1000
+                    self.log(f"⚡ 병렬 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
                     return
                     
                 except Exception as e:
-                    self.log(f"키보드 클릭 실패: {e}")
+                    self.log(f"❌ 병렬 클릭 실패: {e}")
                 
                 # 🚀 방법 3: 화면 예상 위치 연타 (마지막 백업)
                 try:
@@ -1679,6 +1985,30 @@ class TimeSyncMacroGUI:
             error_msg = f"요약 리포트 생성 실패: {e}"
             self.log(f"❌ {error_msg}")
             messagebox.showerror("오류", error_msg)
+    
+    def on_closing(self):
+        """프로그램 종료 시 호출되는 함수"""
+        try:
+            # 누적 데이터 저장
+            if hasattr(self, 'cumulative_measurements') and len(self.cumulative_measurements) > 0:
+                self.save_cumulative_data()
+                self.log("💾 누적 동기화 데이터 저장 완료")
+            
+            # 키보드 리스너 정리
+            if hasattr(self, 'position_listener') and self.position_listener:
+                try:
+                    self.position_listener.unhook_all()
+                except:
+                    pass
+            
+            # 로그 파일에 종료 기록
+            if hasattr(self, 'logger'):
+                self.logger.info("프로그램 정상 종료")
+                
+        except Exception as e:
+            print(f"종료 처리 중 오류: {e}")
+        finally:
+            self.root.destroy()
     
     def run(self): 
         """GUI 실행"""
