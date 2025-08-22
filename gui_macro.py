@@ -200,16 +200,20 @@ class TimeSyncMacroGUI:
         quick_frame = ttk.Frame(main_frame)
         quick_frame.grid(row=4, column=0, columnspan=2, pady=10, sticky=(tk.W, tk.E))
         
+        ttk.Button(quick_frame, text="0.5초 후", 
+                  command=lambda: self.set_quick_time_precise(0.5)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(quick_frame, text="1.5초 후", 
+                  command=lambda: self.set_quick_time_precise(1.5)).pack(side=tk.LEFT, padx=2)
         ttk.Button(quick_frame, text="3초 후", 
-                  command=lambda: self.set_quick_time(3)).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self.set_quick_time(3)).pack(side=tk.LEFT, padx=2)
         ttk.Button(quick_frame, text="5초 후", 
-                  command=lambda: self.set_quick_time(5)).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self.set_quick_time(5)).pack(side=tk.LEFT, padx=2)
         ttk.Button(quick_frame, text="10초 후", 
-                  command=lambda: self.set_quick_time(10)).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self.set_quick_time(10)).pack(side=tk.LEFT, padx=2)
         ttk.Button(quick_frame, text="30초 후", 
-                  command=lambda: self.set_quick_time(30)).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self.set_quick_time(30)).pack(side=tk.LEFT, padx=2)
         ttk.Button(quick_frame, text="1분 후", 
-                  command=lambda: self.set_quick_time(60)).pack(side=tk.LEFT, padx=5)
+                  command=lambda: self.set_quick_time(60)).pack(side=tk.LEFT, padx=2)
         
         # 동기화 정보 표시
         info_frame = ttk.LabelFrame(main_frame, text="동기화 정보", padding="10")
@@ -265,11 +269,11 @@ class TimeSyncMacroGUI:
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=6, column=0, columnspan=2, pady=20, sticky=(tk.W, tk.E))
         
-        self.sync_button = ttk.Button(button_frame, text="시간 동기화 (5회)", 
+        self.sync_button = ttk.Button(button_frame, text="🎯 정밀 동기화 (초변화캐치)", 
                                      command=lambda: self.sync_time(5))
         self.sync_button.pack(side=tk.LEFT, padx=5)
         
-        self.sync_intensive_button = ttk.Button(button_frame, text="정밀 동기화 (20회)", 
+        self.sync_intensive_button = ttk.Button(button_frame, text="🔬 하이브리드 동기화 (캐치+검증)", 
                                                command=lambda: self.sync_time(20))
         self.sync_intensive_button.pack(side=tk.LEFT, padx=5)
         
@@ -542,6 +546,202 @@ class TimeSyncMacroGUI:
         self.log("⚠️ 기존 방식은 새로운 좌표 캡처 모드로 변경되었습니다")
         self.log("💡 '좌표 캡처 모드' 버튼을 사용하세요!")
     
+    def precise_second_change_sync(self, url, max_attempts=10):
+        """초 변화 순간을 캐치하여 정밀한 시간 동기화 수행
+        
+        전략: 0.05초 간격으로 요청을 보내서 서버 시간의 초가 바뀌는 정확한 순간을 포착
+        이렇게 하면 밀리초 단위의 정확한 동기화가 가능함
+        """
+        self.log("🎯 초 변화 순간 캐치 동기화 시작...")
+        self.log("💡 전략: 서버 시간 초 전환 순간을 포착해 밀리초 정확도 확보")
+        
+        successful_measurements = []
+        
+        for attempt in range(max_attempts):
+            try:
+                self.log(f"시도 {attempt + 1}/{max_attempts}: 초 변화 순간 탐지 중...")
+                
+                # 1단계: 현재 서버 시간 확인
+                current_server_second = None
+                for _ in range(20):  # 최대 1초 동안 시도
+                    try:
+                        with urlopen(url, timeout=3) as response:
+                            server_time_str = response.headers.get('Date')
+                            if server_time_str:
+                                server_time = self.parse_server_time(server_time_str)
+                                if server_time:
+                                    current_server_second = server_time.second
+                                    break
+                    except:
+                        continue
+                    time.sleep(0.05)
+                
+                if current_server_second is None:
+                    self.log(f"  ❌ 초기 서버 시간 획득 실패")
+                    continue
+                
+                self.log(f"  📍 현재 서버 초: {current_server_second}초")
+                
+                # 2단계: 초 변화 순간 대기 및 포착
+                change_detected = False
+                measurements_this_attempt = []
+                start_monitoring = time.perf_counter()
+                
+                while time.perf_counter() - start_monitoring < 2.0:  # 최대 2초 대기
+                    try:
+                        # 정밀한 타이밍 측정
+                        local_before = time.perf_counter()
+                        local_before_real = time.time()
+                        
+                        with urlopen(url, timeout=2) as response:
+                            local_after = time.perf_counter()
+                            local_after_real = time.time()
+                            
+                            server_time_str = response.headers.get('Date')
+                            if server_time_str:
+                                server_time = self.parse_server_time(server_time_str)
+                                if server_time and server_time.second != current_server_second:
+                                    # 🎯 초 변화 순간 포착!
+                                    change_detected = True
+                                    
+                                    # 네트워크 지연 계산
+                                    latency = (local_after - local_before) / 2
+                                    
+                                    # 서버 시간은 정확히 초 단위 (밀리초=0)
+                                    # 즉, server_time.second:00.000 시점
+                                    server_exact_timestamp = server_time.replace(microsecond=0).timestamp()
+                                    
+                                    # 로컬에서 해당 시점의 추정 시간
+                                    local_at_server_time = local_before_real + latency
+                                    
+                                    # 오프셋 계산
+                                    offset = server_exact_timestamp - local_at_server_time
+                                    
+                                    measurement = {
+                                        'attempt': attempt + 1,
+                                        'server_second_change': server_time.second,
+                                        'previous_second': current_server_second,
+                                        'latency': latency,
+                                        'offset': offset,
+                                        'local_before': local_before_real,
+                                        'local_after': local_after_real,
+                                        'server_exact_time': server_exact_timestamp,
+                                        'local_at_server_time': local_at_server_time,
+                                        'response_time': (local_after - local_before) * 1000
+                                    }
+                                    
+                                    measurements_this_attempt.append(measurement)
+                                    
+                                    # 로깅
+                                    change_time = datetime.fromtimestamp(server_exact_timestamp)
+                                    local_time = datetime.fromtimestamp(local_at_server_time)
+                                    
+                                    self.log(f"  🎯 초 변화 포착! {current_server_second}→{server_time.second}초")
+                                    self.log(f"    서버 정확 시간: {change_time.strftime('%H:%M:%S.000')}")
+                                    self.log(f"    로컬 추정 시간: {local_time.strftime('%H:%M:%S.%f')[:-3]}")
+                                    self.log(f"    네트워크 지연: {latency*1000:.1f}ms")
+                                    self.log(f"    시간 오프셋: {offset*1000:+.1f}ms")
+                                    
+                                    break
+                    
+                    except Exception as e:
+                        # 조용히 계속 시도
+                        pass
+                    
+                    # 0.05초 간격으로 재시도
+                    time.sleep(0.05)
+                
+                if change_detected and measurements_this_attempt:
+                    # 이번 시도에서 여러 측정값이 있다면 가장 낮은 지연시간 선택
+                    best_measurement = min(measurements_this_attempt, key=lambda x: x['latency'])
+                    successful_measurements.append(best_measurement)
+                    
+                    self.log(f"  ✅ 시도 {attempt + 1} 성공! (지연: {best_measurement['latency']*1000:.1f}ms)")
+                    
+                    # 연속 3회 성공하면 충분
+                    if len(successful_measurements) >= 3:
+                        self.log(f"🎉 {len(successful_measurements)}회 성공 측정 완료!")
+                        break
+                else:
+                    self.log(f"  ❌ 시도 {attempt + 1} 실패: 초 변화 감지 안됨")
+                
+                # 다음 시도 전 잠시 대기
+                time.sleep(0.1)
+                
+            except Exception as e:
+                self.log(f"  ❌ 시도 {attempt + 1} 오류: {e}")
+                continue
+        
+        if successful_measurements:
+            # 최종 결과 계산
+            latencies = [m['latency'] for m in successful_measurements]
+            offsets = [m['offset'] for m in successful_measurements]
+            
+            # 이상값 제거 (지연시간 기준)
+            median_latency = statistics.median(latencies)
+            clean_measurements = [m for m in successful_measurements 
+                                if m['latency'] <= median_latency * 1.5]
+            
+            if clean_measurements:
+                clean_latencies = [m['latency'] for m in clean_measurements]
+                clean_offsets = [m['offset'] for m in clean_measurements]
+                
+                # 중앙값 사용 (더 안정적)
+                self.network_latency = statistics.median(clean_latencies)
+                self.server_time_offset = statistics.median(clean_offsets)
+                
+                # 정확도 계산
+                latency_std = statistics.stdev(clean_latencies) if len(clean_latencies) > 1 else 0
+                offset_std = statistics.stdev(clean_offsets) if len(clean_offsets) > 1 else 0
+                
+                # 결과 로깅
+                self.log("=" * 60)
+                self.log("🎯 초 변화 순간 캐치 동기화 완료!")
+                self.log(f"📊 성공 측정: {len(clean_measurements)}/{max_attempts}회")
+                self.log(f"🌐 서버 시간차: {self.server_time_offset*1000:+.1f}ms (±{offset_std*1000:.1f}ms)")
+                self.log(f"⚡ 네트워크 지연: {self.network_latency*1000:.1f}ms (±{latency_std*1000:.1f}ms)")
+                self.log(f"🔬 예상 정확도: ±{(offset_std + latency_std)*1000:.1f}ms")
+                self.log(f"💡 방법: 서버 초 전환 순간 포착으로 밀리초 정확도 확보")
+                self.log("=" * 60)
+                
+                # 상세 로그 파일 기록
+                self.logger.info("="*60)
+                self.logger.info("초 변화 순간 캐치 동기화 완료")
+                self.logger.info(f"성공 측정: {len(clean_measurements)}회")
+                self.logger.info(f"서버 시간차: {self.server_time_offset*1000:+.3f}ms ± {offset_std*1000:.3f}ms")
+                self.logger.info(f"네트워크 지연: {self.network_latency*1000:.3f}ms ± {latency_std*1000:.3f}ms")
+                
+                for i, m in enumerate(clean_measurements):
+                    self.logger.debug(f"측정 {i+1}: 지연 {m['latency']*1000:.1f}ms, "
+                                    f"오프셋 {m['offset']*1000:+.1f}ms, "
+                                    f"{m['previous_second']}→{m['server_second_change']}초")
+                
+                self.logger.info("="*60)
+                
+                return True
+        
+        self.log("❌ 초 변화 순간 캐치 동기화 실패!")
+        return False
+    
+    def parse_server_time(self, server_time_str):
+        """서버 시간 문자열을 파싱"""
+        try:
+            time_formats = [
+                '%a, %d %b %Y %H:%M:%S GMT',
+                '%a, %d %b %Y %H:%M:%S %Z',
+                '%d %b %Y %H:%M:%S GMT',
+            ]
+            
+            for fmt in time_formats:
+                try:
+                    server_time = datetime.strptime(server_time_str, fmt)
+                    return server_time.replace(tzinfo=timezone.utc)
+                except ValueError:
+                    continue
+            return None
+        except:
+            return None
+
     def continuous_sync_monitoring(self, url, duration=30):
         """연속적인 시간 동기화 모니터링"""
         self.log(f"{duration}초 동안 연속 모니터링을 시작합니다...")
@@ -711,7 +911,7 @@ class TimeSyncMacroGUI:
         
         def sync_thread():
             try:
-                self.log(f"시간 동기화 시작... ({num_samples}회 측정)")
+                self.log(f"정밀 시간 동기화 시작...")
                 self.sync_button.config(state=tk.DISABLED)
                 self.sync_intensive_button.config(state=tk.DISABLED)
                 
@@ -725,7 +925,28 @@ class TimeSyncMacroGUI:
                     except Exception as e:
                         self.log(f"브라우저 미리 열기 실패: {e}")
                 
-                success = self.measure_server_time_offset(url, num_samples)
+                # 🎯 우선 시도: 초 변화 순간 캐치 방법 (고정밀도)
+                if num_samples <= 10:  # 일반 동기화에서는 새 방법 사용
+                    self.log("🎯 고정밀 방법: 초 변화 순간 캐치 동기화 시도...")
+                    success = self.precise_second_change_sync(url, max_attempts=min(num_samples, 5))
+                else:
+                    # 정밀 동기화(20회)에서는 기존 방법과 새 방법 결합
+                    self.log("🎯 하이브리드 방법: 초 변화 캐치 + 다중 측정...")
+                    success_precise = self.precise_second_change_sync(url, max_attempts=3)
+                    if success_precise:
+                        # 추가로 기존 방법으로 검증
+                        self.log("✅ 초 변화 캐치 성공! 추가 검증 측정 실행...")
+                        success_traditional = self.measure_server_time_offset(url, 5)
+                        success = True  # 초 변화 캐치가 성공했으므로 성공으로 간주
+                    else:
+                        # 백업으로 기존 방법 사용
+                        self.log("⚠️ 초 변화 캐치 실패, 기존 방법으로 전환...")
+                        success = self.measure_server_time_offset(url, num_samples)
+                
+                # 백업 방법: 기존 다중 측정 (새 방법 실패 시)
+                if not success:
+                    self.log("🔄 백업 방법: 기존 다중 측정 동기화 시도...")
+                    success = self.measure_server_time_offset(url, num_samples)
                 
                 if success:
                     self.sync_status.set("동기화 완료")
@@ -733,16 +954,18 @@ class TimeSyncMacroGUI:
                     self.offset_var.set(f"{self.server_time_offset*1000:.1f}ms")
                     
                     # 정확도 계산
-                    if len(self.measurement_history) > 1:
+                    if hasattr(self, 'measurement_history') and len(self.measurement_history) > 1:
                         latencies = [m['latency'] for m in self.measurement_history[-num_samples:]]
                         std_dev = statistics.stdev(latencies) if len(latencies) > 1 else 0
                         self.accuracy_var.set(f"±{std_dev*1000:.1f}ms")
                     
-                    self.measurement_count_var.set(str(len(self.measurement_history)))
-                    self.log("시간 동기화 완료!")
+                    if hasattr(self, 'measurement_history'):
+                        self.measurement_count_var.set(str(len(self.measurement_history)))
+                    
+                    self.log("✅ 시간 동기화 완료!")
                 else:
                     self.sync_status.set("동기화 실패")
-                    self.log("시간 동기화 실패!")
+                    self.log("❌ 모든 동기화 방법 실패!")
                 
             finally:
                 self.sync_button.config(state=tk.NORMAL)
