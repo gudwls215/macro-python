@@ -192,7 +192,7 @@ class TimeSyncMacroGUI:
         self.time_entry.grid(row=2, column=1, sticky=(tk.W, tk.E), pady=5)
         
         # 시간 형식 안내
-        time_help = ttk.Label(main_frame, text="형식: HH:MM:SS 또는 YYYY-MM-DD HH:MM:SS (서버 시간 기준)", 
+        time_help = ttk.Label(main_frame, text="형식: HH:MM:SS.mmm 또는 YYYY-MM-DD HH:MM:SS.mmm (밀리초 포함 가능)", 
                              foreground="gray")
         time_help.grid(row=3, column=1, sticky=tk.W, pady=(0, 10))
         
@@ -616,6 +616,88 @@ class TimeSyncMacroGUI:
         else:
             self.log(f"목표 시간이 {seconds_later}초 후로 설정되었습니다")
     
+    def set_quick_time_precise(self, seconds_later):
+        """정밀한 빠른 시간 설정 (밀리초 단위)"""
+        # 밀리초까지 포함하여 설정
+        target_datetime = datetime.fromtimestamp(time.time() + seconds_later)
+        
+        # 밀리초까지 표시
+        time_str = target_datetime.strftime("%H:%M:%S.%f")[:-3]  # 마이크로초를 밀리초로 변환
+        self.time_var.set(time_str)
+        
+        if hasattr(self, 'server_time_offset') and self.server_time_offset != 0:
+            # 서버 시간도 함께 표시
+            server_target = datetime.fromtimestamp(time.time() + self.server_time_offset + seconds_later)
+            self.log(f"정밀 목표 시간 설정: {seconds_later}초 후")
+            self.log(f"  로컬 시간: {target_datetime.strftime('%H:%M:%S.%f')[:-3]}")
+            self.log(f"  서버 시간: {server_target.strftime('%H:%M:%S.%f')[:-3]}")
+        else:
+            self.log(f"정밀 목표 시간이 {seconds_later}초 후로 설정되었습니다 ({time_str})")
+    
+    def parse_target_time(self, target_time):
+        """목표 시간 파싱 (밀리초 지원)
+        
+        지원 형식:
+        - HH:MM:SS (예: 15:30:45)
+        - HH:MM:SS.mmm (예: 15:30:45.123)
+        - YYYY-MM-DD HH:MM:SS (예: 2025-08-22 15:30:45)
+        - YYYY-MM-DD HH:MM:SS.mmm (예: 2025-08-22 15:30:45.123)
+        
+        Returns:
+            tuple: (target_datetime, target_timestamp)
+        """
+        target_time = target_time.strip()
+        
+        # 지원하는 시간 형식들 (밀리초 포함)
+        formats = [
+            # 전체 날짜/시간 + 밀리초
+            '%Y-%m-%d %H:%M:%S.%f',
+            '%Y-%m-%d %H:%M:%S',
+            # 시간만 + 밀리초
+            '%H:%M:%S.%f',
+            '%H:%M:%S',
+            # 추가 형식들
+            '%Y/%m/%d %H:%M:%S.%f',
+            '%Y/%m/%d %H:%M:%S',
+        ]
+        
+        # 각 형식으로 파싱 시도
+        for fmt in formats:
+            try:
+                if '%Y' in fmt:
+                    # 전체 날짜/시간이 포함된 경우
+                    target_datetime = datetime.strptime(target_time, fmt)
+                    target_timestamp = target_datetime.timestamp()
+                    self.log(f"목표 시간 파싱 성공 (전체): {target_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                    return target_datetime, target_timestamp
+                else:
+                    # 시간만 입력된 경우 (오늘 날짜 적용)
+                    if hasattr(self, 'server_time_offset') and self.server_time_offset != 0:
+                        # 서버 시간 기준으로 오늘 날짜 계산
+                        server_now = datetime.fromtimestamp(time.time() + self.server_time_offset)
+                        today = server_now.date()
+                    else:
+                        today = datetime.now().date()
+                    
+                    time_part = datetime.strptime(target_time, fmt).time()
+                    target_datetime = datetime.combine(today, time_part)
+                    target_timestamp = target_datetime.timestamp()
+                    
+                    self.log(f"목표 시간 파싱 성공 (시간만): {target_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                    return target_datetime, target_timestamp
+                    
+            except ValueError:
+                continue
+        
+        # 모든 형식으로 파싱 실패한 경우
+        raise ValueError(f"지원하지 않는 시간 형식입니다.\n"
+                        f"지원 형식:\n"
+                        f"  - HH:MM:SS (예: 15:30:45)\n"
+                        f"  - HH:MM:SS.mmm (예: 15:30:45.123)\n"
+                        f"  - YYYY-MM-DD HH:MM:SS (예: 2025-08-22 15:30:45)\n"
+                        f"  - YYYY-MM-DD HH:MM:SS.mmm (예: 2025-08-22 15:30:45.123)\n"
+                        f"입력값: '{target_time}'")
+    
     def sync_time(self, num_samples=5):
         """시간 동기화 실행"""
         url = self.url_var.get().strip()
@@ -895,32 +977,13 @@ class TimeSyncMacroGUI:
                 self.start_button.config(state=tk.DISABLED)
                 self.stop_button.config(state=tk.NORMAL)
                 
-                # 목표 시간 파싱 (서버 시간 기준으로 해석)
+                # 목표 시간 파싱 (서버 시간 기준으로 해석) - 밀리초 지원
                 try:
-                    target_datetime = datetime.strptime(target_time, '%Y-%m-%d %H:%M:%S')
-                    target_timestamp = target_datetime.timestamp()
-                except ValueError:
-                    try:
-                        # 시간만 입력된 경우 (오늘 날짜 적용)
-                        if hasattr(self, 'server_time_offset') and self.server_time_offset != 0:
-                            # 서버 시간 기준으로 오늘 날짜 계산
-                            server_now = datetime.fromtimestamp(time.time() + self.server_time_offset)
-                            today = server_now.date()
-                        else:
-                            today = datetime.now().date()
-                            
-                        time_part = datetime.strptime(target_time, '%H:%M:%S').time()
-                        target_datetime = datetime.combine(today, time_part)
-                        
-                        # 서버 시간 오프셋을 고려하지 않고 목표 시간 자체를 UTC 기준으로 설정
-                        target_timestamp = target_datetime.timestamp()
-                        
-                        self.log(f"목표 시간 설정: {target_datetime} (로컬 시간 기준)")
-                    except ValueError:
-                        self.log("시간 형식 오류! (형식: HH:MM:SS 또는 YYYY-MM-DD HH:MM:SS)")
-                        return
-                
-                self.log(f"목표 시간: {target_datetime}")
+                    target_datetime, target_timestamp = self.parse_target_time(target_time)
+                    self.log(f"목표 시간: {target_datetime.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
+                except ValueError as e:
+                    self.log(f"시간 형식 오류! {str(e)}")
+                    return
                 self.log("정확한 타이밍 대기 중...")
                 
                 # 목표 시간까지의 대략적인 대기
