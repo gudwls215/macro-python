@@ -9,7 +9,7 @@ echo ==========================================
 echo.
 
 REM 배포 폴더 생성
-set release_name=PrecisionTimingMacro_v2.0_Release
+set release_name=PrecisionTimingMacro_v2.1_Release
 echo 📁 배포 폴더 생성: %release_name%
 
 if exist "%release_name%" rmdir /s /q "%release_name%"

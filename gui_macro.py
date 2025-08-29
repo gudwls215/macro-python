@@ -56,7 +56,7 @@ class TimeSyncMacroGUI:
         self.measurement_history = []  # 측정 히스토리 저장
         self.browser_opened = False
         self.timing_adjustments = []  # 타이밍 조정 히스토리
-        self.execution_time_history = [0.500]  # 클릭 실행시간 히스토리 (실측값 500ms로 초기화)
+        self.execution_time_history = [0.100]  # 클릭 실행시간 히스토리 (실측값 500ms로 초기화)
         
         # 누적 동기화 데이터 (새로 추가)
         self.cumulative_measurements = []  # 모든 동기화 세션의 측정값 누적
@@ -530,14 +530,30 @@ class TimeSyncMacroGUI:
                 try:
                     import pyautogui
                     x, y = pyautogui.position()
-                    self.purchase_button_positions.append((x, y))
                     
-                    self.log(f"📍 좌표 {len(self.purchase_button_positions)} 추가: ({x}, {y})")
+                    # 중복 좌표 검사
+                    is_duplicate = False
+                    for existing_x, existing_y in self.purchase_button_positions:
+                        if abs(x - existing_x) < 5 and abs(y - existing_y) < 5:  # 5픽셀 이내면 중복으로 간주
+                            is_duplicate = True
+                            break
+                    
+                    if is_duplicate:
+                        self.log(f"⚠️ 중복 좌표 감지: ({x}, {y}) - 추가하지 않음")
+                    else:
+                        self.purchase_button_positions.append((x, y))
+                        self.log(f"📍 좌표 {len(self.purchase_button_positions)} 추가: ({x}, {y})")
+                        self.log(f"📋 현재 저장된 좌표 목록:")
+                        for i, (px, py) in enumerate(self.purchase_button_positions):
+                            self.log(f"  {i+1}. ({px}, {py})")
                     
                     # 간단한 피드백
                     try:
                         import winsound
-                        winsound.Beep(1500, 100)  # 높은 음으로 확인
+                        if is_duplicate:
+                            winsound.Beep(800, 200)  # 낮은 음으로 중복 알림
+                        else:
+                            winsound.Beep(1500, 100)  # 높은 음으로 확인
                     except:
                         pass
                         
@@ -1455,6 +1471,17 @@ class TimeSyncMacroGUI:
                 self.start_button.config(state=tk.DISABLED)
                 self.stop_button.config(state=tk.NORMAL)
                 
+                # 저장된 좌표 확인 및 로그 출력
+                if hasattr(self, 'purchase_button_positions') and len(self.purchase_button_positions) > 0:
+                    self.log("=" * 50)
+                    self.log(f"🎯 구매 좌표 확인: {len(self.purchase_button_positions)}개 좌표 저장됨")
+                    for i, (x, y) in enumerate(self.purchase_button_positions):
+                        self.log(f"  좌표 {i+1}: ({x}, {y})")
+                    self.log("⚡ 매크로 실행 시 모든 좌표를 순차적으로 클릭합니다!")
+                    self.log("=" * 50)
+                else:
+                    self.log("⚠️ 경고: 저장된 좌표가 없습니다. 기본 키보드/마우스 동작을 사용합니다.")
+                
                 # 목표 시간 파싱 (서버 시간 기준으로 해석) - 밀리초 지원
                 try:
                     target_datetime, target_timestamp = self.parse_target_time(target_time)
@@ -1763,28 +1790,22 @@ class TimeSyncMacroGUI:
                 if hasattr(self, 'purchase_button_positions') and len(self.purchase_button_positions) > 0:
                     self.log(f"⚡ {len(self.purchase_button_positions)}개 좌표 초고속 병렬 클릭!")
                     
-                    # 병렬 클릭 함수
-                    def fast_click(x, y):
+                    # 순차적 초고속 클릭 (더 안정적)
+                    click_count = 0
+                    for i, (x, y) in enumerate(self.purchase_button_positions):
                         try:
+                            self.log(f"  🎯 좌표 {i+1}: ({x}, {y}) 클릭 중...")
                             pyautogui.click(x, y, duration=0)  # 즉시 클릭
-                        except:
-                            pass
-                    
-                    # 모든 좌표를 동시에 병렬 클릭
-                    import threading
-                    threads = []
-                    for x, y in self.purchase_button_positions:
-                        thread = threading.Thread(target=fast_click, args=(x, y))
-                        threads.append(thread)
-                        thread.start()
-                    
-                    # 모든 스레드 완료 대기 (최대 50ms)
-                    for thread in threads:
-                        thread.join(timeout=0.05)
+                            click_count += 1
+                            # 매우 짧은 간격으로 다음 클릭 (1ms)
+                            if i < len(self.purchase_button_positions) - 1:
+                                time.sleep(0.001)
+                        except Exception as e:
+                            self.log(f"  ❌ 좌표 {i+1} 클릭 실패: {e}")
                     
                     click_end_time = time.perf_counter()
                     actual_click_time = (click_end_time - click_start_time) * 1000
-                    self.log(f"⚡ 병렬 클릭 완료! 소요시간: {actual_click_time:.1f}ms")
+                    self.log(f"⚡ 다중 클릭 완료! {click_count}/{len(self.purchase_button_positions)}개 성공, 소요시간: {actual_click_time:.1f}ms")
                     return
                 
                 # 🚀 방법 2: 키보드 + 마우스 동시 병렬 실행 (저장된 좌표가 없을 때)

@@ -18,7 +18,7 @@ echo 🔨 최적화 빌드 시작...
 pyinstaller ^
     --onefile ^
     --noconsole ^
-    --name "PrecisionTimingMacro_v2.0" ^
+    --name "PrecisionTimingMacro_v2.1" ^
     --hidden-import=tkinter ^
     --hidden-import=tkinter.ttk ^
     --hidden-import=tkinter.messagebox ^
