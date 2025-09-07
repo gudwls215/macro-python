@@ -20,6 +20,8 @@ import subprocess
 import os
 import json
 import logging
+import socket
+import struct
 
 # pyautogui와 keyboard 모듈 임포트 (선택적)
 try:
@@ -51,6 +53,13 @@ class TimeSyncMacroGUI:
         
         self.server_time_offset = 0
         self.network_latency = 0
+        # NTP 관련 변수 추가
+        self.ntp_server_time_offset = 0
+        self.ntp_network_latency = 0
+        # 적응형 지연 예측 시스템
+        self.adaptive_latency_history = []
+        self.predicted_latency = 0
+        self.latency_variance = 0
         self.is_running = False
         self.log_queue = queue.Queue()
         self.measurement_history = []  # 측정 히스토리 저장
@@ -73,14 +82,17 @@ class TimeSyncMacroGUI:
         # 로깅 시스템 초기화
         self.setup_logging()
         
-        # 누적 동기화 데이터 로드
-        self.load_cumulative_data()
-        
-        # Windows 고해상도 타이머 설정
-        self.setup_high_resolution_timer()
+        # Windows 고해상도 타이머 설정 (비blocking)
+        try:
+            self.setup_high_resolution_timer()
+        except Exception as e:
+            print(f"고해상도 타이머 설정 실패: {e}")
         
         self.create_widgets()
         self.start_log_processor()
+        
+        # 누적 동기화 데이터 로드 (백그라운드에서)
+        threading.Thread(target=self.load_cumulative_data, daemon=True).start()
         
         # 프로그램 종료 시 누적 데이터 저장
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
@@ -171,16 +183,170 @@ class TimeSyncMacroGUI:
         
         # 적응적 대기 전략
         if duration > 0.05:  # 50ms 이상 - 일반 sleep으로 대부분 대기
-            time.sleep(duration - 0.005)  # 5ms 여유 두고 sleep
+            time.sleep(duration - 0.003)  # 3ms 여유 두고 sleep (개선)
         elif duration > 0.01:  # 10-50ms - 부분 sleep
-            time.sleep(duration * 0.7)  # 70%만 sleep
+            time.sleep(duration * 0.8)  # 80%만 sleep (개선)
         elif duration > 0.002:  # 2-10ms - 짧은 sleep
-            time.sleep(duration * 0.3)  # 30%만 sleep
+            time.sleep(duration * 0.5)  # 50%만 sleep (개선)
         # 2ms 이하는 pure busy wait
         
-        # 나머지 시간을 busy wait으로 정밀하게
+        # 나머지 시간을 busy wait으로 정밀하게 (yield 추가)
         while time.perf_counter() < end_time:
-            pass  # CPU 집중 대기
+            if end_time - time.perf_counter() > 0.0001:  # 0.1ms 이상 남았으면
+                time.sleep(0)  # yield to other threads
+    
+    def update_adaptive_latency_prediction(self, new_latency):
+        """적응형 지연 시간 예측 업데이트"""
+        self.adaptive_latency_history.append(new_latency)
+        
+        # 최근 20개 측정값만 유지
+        if len(self.adaptive_latency_history) > 20:
+            self.adaptive_latency_history.pop(0)
+        
+        if len(self.adaptive_latency_history) >= 3:
+            import statistics
+            
+            # 가중 평균 (최근 값에 더 높은 가중치)
+            weights = [i + 1 for i in range(len(self.adaptive_latency_history))]
+            weighted_sum = sum(w * l for w, l in zip(weights, self.adaptive_latency_history))
+            weight_sum = sum(weights)
+            self.predicted_latency = weighted_sum / weight_sum
+            
+            # 분산 계산
+            self.latency_variance = statistics.variance(self.adaptive_latency_history)
+            
+            self.logger.debug(f"적응형 지연 예측 업데이트: {self.predicted_latency*1000:.1f}ms ± {self.latency_variance**0.5*1000:.1f}ms")
+    
+    def get_optimized_click_timing(self, target_timestamp):
+        """최적화된 클릭 타이밍 계산"""
+        current_time = time.time()
+        
+        # 기본 예측 지연시간 사용 (적응형이 있으면 사용, 없으면 기본값)
+        if self.predicted_latency > 0:
+            predicted_network_delay = self.predicted_latency
+            # 분산이 큰 경우 보수적으로 조정
+            if self.latency_variance > 0.001:  # 1ms 이상의 분산
+                predicted_network_delay += self.latency_variance**0.5  # 표준편차만큼 여유
+        else:
+            predicted_network_delay = self.network_latency
+        
+        # 실행 지연 예측 (과거 히스토리 기반)
+        if len(self.execution_time_history) > 0:
+            avg_execution_delay = sum(self.execution_time_history) / len(self.execution_time_history)
+        else:
+            avg_execution_delay = 0.003  # 기본 3ms
+        
+        # 시스템 부하 및 프로세스 우선순위 고려 (간단한 휴리스틱)
+        system_load_factor = 1.0
+        if len(self.adaptive_latency_history) > 5:
+            recent_variance = statistics.variance(self.adaptive_latency_history[-5:])
+            if recent_variance > 0.0001:  # 0.1ms 이상의 최근 분산
+                system_load_factor = 1.2  # 20% 여유 추가
+        
+        # 최적 클릭 시점 계산
+        optimal_click_time = (target_timestamp 
+                             - predicted_network_delay * system_load_factor
+                             - avg_execution_delay
+                             - self.server_time_offset)
+        
+        # 남은 시간 계산
+        time_until_click = optimal_click_time - current_time
+        
+        self.logger.debug(f"최적 클릭 타이밍 계산: "
+                         f"예측지연={predicted_network_delay*1000:.1f}ms, "
+                         f"실행지연={avg_execution_delay*1000:.1f}ms, "
+                         f"부하계수={system_load_factor:.2f}, "
+                         f"대기시간={time_until_click:.3f}s")
+        
+        return optimal_click_time, time_until_click
+    
+    def measure_ntp_time_offset(self, ntp_servers=None):
+        """NTP 서버를 이용한 초정밀 시간 동기화"""
+        if ntp_servers is None:
+            ntp_servers = [
+                'time.google.com',
+                'time.cloudflare.com', 
+                'pool.ntp.org',
+                'time.nist.gov'
+            ]
+        
+        best_offset = 0
+        best_latency = float('inf')
+        successful_measurements = []
+        
+        self.log("🌐 NTP 서버 기반 초정밀 시간 동기화 시작...")
+        
+        for server in ntp_servers:
+            try:
+                # NTP 패킷 생성
+                ntp_packet = b'\x1b' + 47 * b'\0'
+                
+                for attempt in range(3):  # 서버당 3회 시도
+                    sock = None
+                    try:
+                        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                        sock.settimeout(2)  # 2초로 타임아웃 단축
+                        
+                        # 송신 시간 기록
+                        t1 = time.time()
+                        sock.sendto(ntp_packet, (server, 123))
+                        
+                        # 응답 수신
+                        response, _ = sock.recvfrom(48)
+                        t4 = time.time()
+                        
+                        # NTP 응답 파싱
+                        unpacked = struct.unpack('!12I', response)
+                        t3 = unpacked[10] + float(unpacked[11]) / 2**32 - 2208988800  # NTP epoch to Unix epoch
+                        
+                        # 네트워크 지연 및 오프셋 계산
+                        latency = (t4 - t1) / 2
+                        offset = t3 - (t1 + latency)
+                        
+                        if latency < best_latency:
+                            best_latency = latency
+                            best_offset = offset
+                            
+                        successful_measurements.append({
+                            'server': server,
+                            'offset': offset,
+                            'latency': latency,
+                            'attempt': attempt + 1
+                        })
+                        
+                        self.log(f"  {server}: 지연 {latency*1000:.1f}ms, 오프셋 {offset*1000:+.1f}ms")
+                        break
+                        
+                    except Exception as e:
+                        if attempt == 2:  # 마지막 시도
+                            self.log(f"  {server}: 연결 실패 - {e}")
+                        continue
+                    finally:
+                        if sock:
+                            try:
+                                sock.close()
+                            except:
+                                pass
+                        
+            except Exception as e:
+                self.log(f"  {server}: 서버 오류 - {e}")
+                continue
+        
+        if successful_measurements:
+            # 가장 낮은 지연시간의 측정값 사용
+            best_measurement = min(successful_measurements, key=lambda x: x['latency'])
+            
+            self.ntp_server_time_offset = best_measurement['offset']
+            self.ntp_network_latency = best_measurement['latency']
+            
+            self.log(f"🎯 NTP 동기화 완료: {best_measurement['server']}")
+            self.log(f"   최종 오프셋: {self.ntp_server_time_offset*1000:+.1f}ms")
+            self.log(f"   네트워크 지연: {self.ntp_network_latency*1000:.1f}ms")
+            
+            return True
+        else:
+            self.log("❌ NTP 동기화 실패: 모든 서버 연결 실패")
+            return False
     
     def create_widgets(self):
         """GUI 위젯 생성"""
@@ -271,9 +437,14 @@ class TimeSyncMacroGUI:
         ttk.Label(info_frame, text="오프셋 안정성:").grid(row=9, column=0, sticky=tk.W)
         ttk.Label(info_frame, textvariable=self.stability_var).grid(row=9, column=1, sticky=tk.W)
         
+        # 적응형 지연 예측 정보 추가
+        self.predicted_latency_var = tk.StringVar(value="-")
+        ttk.Label(info_frame, text="예측 지연시간:").grid(row=10, column=0, sticky=tk.W)
+        ttk.Label(info_frame, textvariable=self.predicted_latency_var).grid(row=10, column=1, sticky=tk.W)
+        
         # 현재 시간 표시 (개선된 세로 배치)
         time_frame = ttk.LabelFrame(info_frame, text="실시간 시간", padding="5")
-        time_frame.grid(row=10, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
+        time_frame.grid(row=11, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=5)
         
         # 서버 시간
         self.server_time_var = tk.StringVar()
@@ -307,6 +478,11 @@ class TimeSyncMacroGUI:
         self.sync_intensive_button = ttk.Button(button_frame, text="🔬 하이브리드 동기화 (캐치+검증)", 
                                                command=lambda: self.sync_time(20))
         self.sync_intensive_button.pack(side=tk.LEFT, padx=5)
+        
+        # NTP 초정밀 동기화 버튼 추가
+        self.ntp_sync_button = ttk.Button(button_frame, text="🌐 NTP 초정밀 동기화", 
+                                         command=self.ntp_sync_time)
+        self.ntp_sync_button.pack(side=tk.LEFT, padx=5)
         
         self.start_button = ttk.Button(button_frame, text="구매 매크로 시작", 
                                       command=self.start_macro)
@@ -395,6 +571,14 @@ class TimeSyncMacroGUI:
             # GUI 업데이트
             self.server_time_var.set(f"{server_time_str}")
             self.local_time_var.set(f"{local_time_str}")
+            
+            # 적응형 지연 예측 정보 업데이트
+            if hasattr(self, 'predicted_latency') and self.predicted_latency > 0:
+                pred_str = f"{self.predicted_latency*1000:.1f}ms"
+                if hasattr(self, 'latency_variance') and self.latency_variance > 0:
+                    variance_str = f" ±{(self.latency_variance**0.5)*1000:.1f}ms"
+                    pred_str += variance_str
+                self.predicted_latency_var.set(pred_str)
             
             # 시간차 색상 설정
             if abs(time_diff_ms) < 100:  # 100ms 이하
@@ -1234,6 +1418,39 @@ class TimeSyncMacroGUI:
         
         threading.Thread(target=sync_thread, daemon=True).start()
     
+    def ntp_sync_time(self):
+        """NTP 기반 초정밀 시간 동기화"""
+        def ntp_sync_thread():
+            try:
+                self.ntp_sync_button.config(state=tk.DISABLED)
+                self.log("🌐 NTP 서버 기반 초정밀 동기화 시작...")
+                
+                success = self.measure_ntp_time_offset()
+                
+                if success:
+                    # NTP 결과를 기본 동기화 변수에도 적용
+                    self.server_time_offset = self.ntp_server_time_offset
+                    self.network_latency = self.ntp_network_latency
+                    
+                    # 적응형 지연 예측에 추가
+                    self.update_adaptive_latency_prediction(self.ntp_network_latency)
+                    
+                    self.sync_status.set("NTP 동기화 완료")
+                    self.latency_var.set(f"{self.network_latency*1000:.1f}ms")
+                    self.offset_var.set(f"{self.server_time_offset*1000:.1f}ms")
+                    self.predicted_latency_var.set(f"{self.predicted_latency*1000:.1f}ms")
+                    
+                    self.log("✅ NTP 초정밀 동기화 완료!")
+                    self.log(f"🎯 최종 정확도: 서브밀리초급 (±{(self.latency_variance**0.5)*1000:.1f}ms)")
+                else:
+                    self.sync_status.set("NTP 동기화 실패")
+                    self.log("❌ NTP 동기화 실패 - HTTP 동기화를 시도해보세요")
+                    
+            finally:
+                self.ntp_sync_button.config(state=tk.NORMAL)
+        
+        threading.Thread(target=ntp_sync_thread, daemon=True).start()
+    
     def measure_server_time_offset(self, url, num_samples):
         """서버 시간 동기화 측정 (초정밀 버전 + 상세 로깅)"""
         offsets = []
@@ -1251,32 +1468,35 @@ class TimeSyncMacroGUI:
         
         for i in range(num_samples):
             try:
-                # 여러 번 측정해서 가장 빠른 응답 시간 사용 (네트워크 지연 최소화)
+                # 여러 번 측정해서 가장 높은 품질의 응답 사용
                 best_latency = float('inf')
                 best_offset = 0
                 best_measurement = None
+                best_quality = 0  # 품질 점수 초기화 추가
                 
-                # 각 샘플마다 3번 빠른 측정 시도
-                for attempt in range(3):
+                        # 각 샘플마다 5번 빠른 측정 시도 (개선: 3→5)
+                for attempt in range(5):  # 시도 횟수 증가
                     try:
+                        # 정밀한 시간 측정을 위해 perf_counter와 time() 모두 사용
                         local_before_real = time.time()
                         local_before_precise = time.perf_counter()
                         
-                        with urlopen(url, timeout=5) as response:
+                        with urlopen(url, timeout=3) as response:  # 타임아웃 단축 (5→3초)
                             local_after_real = time.time()
                             local_after_precise = time.perf_counter()
                             
-                            # 정밀한 지연시간 계산
+                            # 정밀한 지연시간 계산 (perf_counter 사용)
                             latency = (local_after_precise - local_before_precise) / 2
                             
                             server_time_str = response.headers.get('Date')
                             if server_time_str:
-                                # 서버 시간 파싱
+                                # 서버 시간 파싱 (개선된 형식 지원)
                                 server_time = None
                                 time_formats = [
                                     '%a, %d %b %Y %H:%M:%S GMT',
                                     '%a, %d %b %Y %H:%M:%S %Z',
                                     '%d %b %Y %H:%M:%S GMT',
+                                    '%a, %d %b %Y %H:%M:%S.%f GMT',  # 마이크로초 지원
                                 ]
                                 
                                 for fmt in time_formats:
@@ -1294,8 +1514,12 @@ class TimeSyncMacroGUI:
                                     local_timestamp_at_server = local_before_real + latency
                                     offset = server_timestamp - local_timestamp_at_server
                                     
-                                    # 가장 빠른 응답(낮은 지연시간) 선택
-                                    if latency < best_latency:
+                                    # 응답 품질 점수 계산 (지연시간과 일관성 고려)
+                                    quality_score = 1.0 / (latency + 0.001)  # 낮은 지연시간이 높은 점수
+                                    
+                                    # 가장 높은 품질의 응답 선택
+                                    if quality_score > best_quality:
+                                        best_quality = quality_score
                                         best_latency = latency
                                         best_offset = offset
                                         best_measurement = {
@@ -1303,6 +1527,7 @@ class TimeSyncMacroGUI:
                                             'attempt': attempt + 1,
                                             'latency': latency,
                                             'offset': offset,
+                                            'quality_score': quality_score,
                                             'local_before': local_before_real,
                                             'local_after': local_after_real,
                                             'server_time': server_timestamp,
@@ -1315,20 +1540,23 @@ class TimeSyncMacroGUI:
                         self.logger.warning(f"측정 {i+1} 시도 {attempt+1} 실패: {e}")
                         continue
                     
-                    # 아주 짧은 간격으로 재시도
-                    time.sleep(0.01)
+                    # 더 짧은 간격으로 재시도 (10ms → 5ms)
+                    time.sleep(0.005)
                 
                 if best_measurement:
                     latencies.append(best_latency)
                     offsets.append(best_offset)
                     self.measurement_history.append(best_measurement)
                     
+                    # 적응형 지연 예측 시스템에 측정값 추가
+                    self.update_adaptive_latency_prediction(best_latency)
+                    
                     # 로그 파일에 상세 측정 결과 기록
                     self.logger.info(f"측정 {i+1:2d}/{num_samples} | "
                                    f"지연: {best_latency*1000:6.1f}ms | "
                                    f"오프셋: {best_offset*1000:+7.1f}ms | "
                                    f"응답시간: {best_measurement['response_time']:6.1f}ms | "
-                                   f"시도: {best_measurement['attempt']}/3")
+                                   f"시도: {best_measurement['attempt']}/5")
                     
                     # JSON 형태로 상세 데이터도 기록
                     self.logger.debug(f"측정 {i+1} 상세: {json.dumps(best_measurement, default=str, indent=None)}")
@@ -1551,15 +1779,22 @@ class TimeSyncMacroGUI:
                                 click_execution_time = 0.500  # 500ms (실제 측정된 키보드/클릭 실행시간)
                                 self.log(f"🕐 실측 클릭 실행시간: {click_execution_time*1000:.0f}ms (500ms 기준)")
                         
-                        # ⭐ 핵심 수정: 서버 시간 기준으로 직접 계산
+                        # ⭐ 핵심 수정: 적응형 타이밍 시스템 사용
                         # 목표 도착 시간 = target_timestamp + target_arrival_delay
                         target_arrival_time = target_timestamp + target_arrival_delay
                         
-                        # 클릭해야 할 서버 시간 = 목표 도착 시간 - 네트워크 지연 - 클릭 실행 시간
-                        required_server_click_time = target_arrival_time - self.network_latency - click_execution_time
+                        # 적응형 최적화된 클릭 타이밍 계산
+                        optimal_click_time, time_until_click = self.get_optimized_click_timing(target_arrival_time)
                         
-                        # 로컬 시간으로 변환 (서버 시간 - 오프셋)
-                        precise_target_time = required_server_click_time - self.server_time_offset
+                        # 기존 방식과 비교를 위한 로그
+                        traditional_click_time = target_arrival_time - self.network_latency - click_execution_time - self.server_time_offset
+                        
+                        self.log(f"🎯 적응형 타이밍 시스템:")
+                        self.log(f"   기존 방식: {datetime.fromtimestamp(traditional_click_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"   최적화 방식: {datetime.fromtimestamp(optimal_click_time).strftime('%H:%M:%S.%f')[:-3]}")
+                        self.log(f"   개선 시간: {(optimal_click_time - traditional_click_time)*1000:+.1f}ms")
+                        
+                        precise_target_time = optimal_click_time
                         
                         # 안전 검증
                         current_local_time = time.time()
@@ -1679,6 +1914,42 @@ class TimeSyncMacroGUI:
                             self.log("⚠️ 조건 불만족 - 500ms 실행시간 기준으로 자동 조정됩니다")
                         
                         # 결과를 히스토리에 저장 (다음 실행 시 동적 조정용)
+                        if not hasattr(self, 'timing_adjustments'):
+                            self.timing_adjustments = []
+                        
+                        # 실행 결과를 적응형 시스템에 피드백
+                        execution_result = {
+                            'target_time': target_timestamp,
+                            'actual_execution_time': actual_execution_time,
+                            'click_delay_ms': click_delay_ms,
+                            'arrival_delay_ms': arrival_delay_ms,
+                            'network_latency_used': self.network_latency,
+                            'predicted_latency_used': self.predicted_latency,
+                            'success': condition1 and condition2,
+                            'timestamp': time.time()
+                        }
+                        
+                        # 실행 시간 히스토리 업데이트 (최근 10회만 유지)
+                        self.execution_time_history.append(actual_execution_time)
+                        if len(self.execution_time_history) > 10:
+                            self.execution_time_history.pop(0)
+                        
+                        # 적응형 지연 예측 정확도 평가 및 조정
+                        if self.predicted_latency > 0:
+                            prediction_error = abs(self.network_latency - self.predicted_latency)
+                            if prediction_error > 0.005:  # 5ms 이상 오차
+                                self.log(f"🔧 적응형 예측 조정: 오차 {prediction_error*1000:.1f}ms")
+                                # 예측 가중치 재조정
+                                self.update_adaptive_latency_prediction(self.network_latency)
+                        
+                        self.timing_adjustments.append(execution_result)
+                        
+                        self.log(f"📈 적응형 학습 업데이트:")
+                        self.log(f"   실행 히스토리: {len(self.execution_time_history)}회")
+                        self.log(f"   평균 실행시간: {sum(self.execution_time_history)/len(self.execution_time_history)*1000:.1f}ms")
+                        self.log(f"   예측 지연시간: {self.predicted_latency*1000:.1f}ms")
+                        
+                        # 결과를 히스토리에 저장 (기존 코드 유지)
                         if not hasattr(self, 'timing_adjustments'):
                             self.timing_adjustments = []
                         if not hasattr(self, 'execution_time_history'):

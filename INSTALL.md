@@ -17,7 +17,7 @@ run_macro.bat
 python --version
 
 # 2. 필수 패키지 설치
-pip install pyautogui keyboard pillow
+pip install -r requirements.txt
 
 # 3. 프로그램 실행
 python gui_macro.py
